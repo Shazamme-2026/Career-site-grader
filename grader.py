@@ -72,6 +72,7 @@ class CareerSiteGrader:
         self._schema_objects: Optional[List[dict]] = None
         self._schema_parse_errors = 0
         self._rec_signals: Optional[Dict] = None
+        self._platform_info: Optional[Dict] = None   # CMS / site-platform fingerprint
         # Headless-rendered DOM (post-JS), populated when ENABLE_HEADLESS=1
         self.rendered_html = ''
         self.rendered_soup: Optional[BeautifulSoup] = None
@@ -215,6 +216,9 @@ class CareerSiteGrader:
             'pages_scanned': ['homepage'] + list(dict.fromkeys(self.pages_scanned)),
             'coverage': self._get_coverage(),
             'mode': self.mode,
+            'platform': self._detect_site_platform(),
+            'tech_stack_summary': self._generate_tech_stack_summary(),
+            'client_logo': self._detect_client_logo(),
             'progress': 100,
         }
 
@@ -1217,6 +1221,348 @@ class CareerSiteGrader:
             'job_routes': list(self.job_routes_found),
         }
         return self._rec_signals
+
+    # -------------------------------------------------------------------------
+    # Platform / tech-stack detection, WordPress security, job-board structure,
+    # client logo — added for the v2.9 report (stack overview + deductions).
+    # -------------------------------------------------------------------------
+
+    # Multi-part public suffixes we treat as a single TLD when finding the
+    # registrable (root) domain, so job.acme.co.uk is a subdomain of acme.co.uk.
+    MULTI_TLDS = {'co.uk', 'org.uk', 'gov.uk', 'ac.uk', 'com.au', 'net.au',
+                  'org.au', 'co.nz', 'co.za', 'com.sg', 'co.in', 'com.br'}
+    # Fallback "current" WordPress major if the live version-check API is down.
+    WP_CORE_FALLBACK = '6.8'
+
+    def _registrable_domain(self, host: str) -> str:
+        host = (host or '').lower().split(':')[0].strip('.')
+        parts = host.split('.')
+        if len(parts) <= 2:
+            return host
+        last2 = '.'.join(parts[-2:])
+        if last2 in self.MULTI_TLDS and len(parts) >= 3:
+            return '.'.join(parts[-3:])
+        return last2
+
+    @staticmethod
+    def _ver_tuple(v):
+        nums = re.findall(r'\d+', v or '')
+        return tuple(int(n) for n in nums[:4]) if nums else (0,)
+
+    def _ver_lt(self, a, b) -> bool:
+        return self._ver_tuple(a) < self._ver_tuple(b)
+
+    def _detect_site_platform(self) -> Dict:
+        """Fingerprint the CMS / site platform from HTML, headers and the
+        generator meta. Cached. Category drives the closing stack pitch and
+        whether the WordPress security checks run."""
+        if self._platform_info is not None:
+            return self._platform_info
+
+        hay = self._combined_html()
+        if self.rendered_html:
+            hay += ' ' + self.rendered_html.lower()
+        hay += ' ' + ' '.join(f'{k}:{v}' for k, v in self.headers.items()).lower()
+
+        gen_el = self.soup.find('meta', attrs={'name': re.compile(r'^generator$', re.I)}) if self.soup else None
+        generator = ((gen_el.get('content') if gen_el else '') or '').strip()
+
+        # Ordered, most-specific first. category ∈ modern-nocode | recruitment-saas
+        # | wordpress | proprietary | cms | custom
+        platform, category = None, None
+        rules = [
+            (r'shazamme', 'Shazamme', 'modern-nocode'),
+            (r'sourceflow', 'SourceFlow', 'recruitment-saas'),
+            (r'volcanic|jobadder\.com/board|idibu|broadbean', 'Recruitment job-board SaaS', 'recruitment-saas'),
+            (r'wp-content|wp-includes|/wp-json|wordpress', 'WordPress', 'wordpress'),
+            (r'cdn-website\.com|dudaone|irp\.cdn-website|window\.parameters', 'Duda', 'modern-nocode'),
+            (r'wixstatic|wix\.com|_wixcssstates|wix-code', 'Wix', 'proprietary'),
+            (r'squarespace|static1\.squarespace|sqs-', 'Squarespace', 'proprietary'),
+            (r'cdn\.shopify|myshopify', 'Shopify', 'proprietary'),
+            (r'webflow\.io|w-nav|webflow', 'Webflow', 'proprietary'),
+            (r'drupal-settings-json|/sites/default/files|drupal', 'Drupal', 'cms'),
+            (r'/media/jui/|joomla', 'Joomla', 'cms'),
+            (r'__next_data__|/_next/', 'Custom (Next.js)', 'custom'),
+        ]
+        for pat, name, cat in rules:
+            if re.search(pat, hay):
+                platform, category = name, cat
+                break
+        if not platform and generator:
+            platform, category = generator.split(',')[0].split(' ')[0], 'cms'
+
+        self._platform_info = {
+            'platform': platform or 'Custom / Unknown',
+            'category': category or 'custom',
+            'generator': generator[:80],
+            'wordpress': None,   # populated by _wordpress_security_checks()
+        }
+        return self._platform_info
+
+    async def _wp_latest_core(self) -> Optional[str]:
+        try:
+            async with aiohttp.ClientSession(headers=self.HEADERS) as s:
+                async with s.get('https://api.wordpress.org/core/version-check/1.7/',
+                                 timeout=aiohttp.ClientTimeout(total=6)) as r:
+                    data = await r.json(content_type=None)
+                    offers = data.get('offers') or []
+                    return offers[0].get('version') if offers else None
+        except Exception:
+            return None
+
+    async def _wp_latest_plugin(self, slug: str) -> Optional[str]:
+        try:
+            url = f'https://api.wordpress.org/plugins/info/1.0/{slug}.json'
+            async with aiohttp.ClientSession(headers=self.HEADERS) as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=6)) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.json(content_type=None)
+                    if not isinstance(data, dict) or data.get('error'):
+                        return None
+                    return data.get('version')
+        except Exception:
+            return None
+
+    async def _wordpress_security_checks(self) -> List[Dict]:
+        """WordPress core + plugin currency, checked live against WordPress.org.
+        Out-of-date core = 0/10; out-of-date plugin(s) = 0/10 and listed.
+        Returns [] for non-WordPress sites so it's a no-op elsewhere."""
+        info = self._detect_site_platform()
+        if info['category'] != 'wordpress':
+            return []
+
+        raw = self.html or ''
+        combined = self._combined_html()
+        if self.rendered_html:
+            combined += ' ' + self.rendered_html
+        checks: List[Dict] = []
+
+        # --- Core version ---
+        core_ver = None
+        m = re.search(r'name=["\']generator["\'][^>]*content=["\']WordPress\s+([0-9.]+)', raw, re.I)
+        if m:
+            core_ver = m.group(1)
+        if not core_ver:
+            m = re.search(r'/wp-includes/[^"\']*\?ver=([0-9]+\.[0-9]+(?:\.[0-9]+)?)', combined)
+            if m:
+                core_ver = m.group(1)
+        latest_core = await self._wp_latest_core() or self.WP_CORE_FALLBACK
+        core_pts, core_note = 10, []
+        if core_ver and self._ver_lt(core_ver, latest_core):
+            core_pts = 0
+            core_note.append(f'WordPress core {core_ver} is OUT OF DATE (latest {latest_core}) — patch now; old cores are the #1 hack vector')
+        elif core_ver:
+            core_note.append(f'WordPress core {core_ver} is current (latest {latest_core}) ✓')
+        else:
+            core_note.append('WordPress detected; core version hidden (good) — confirm it is current in wp-admin')
+        checks.append({'name': 'WordPress Core Currency', 'weight': 10, 'score': core_pts, 'max': 10,
+                       'status': self._pts_status(core_pts, 10), 'detail': ' | '.join(core_note)})
+
+        # --- Plugin versions (slug + ?ver=) checked concurrently against WP.org ---
+        plugins: Dict[str, Optional[str]] = {}
+        for pm in re.finditer(r'/wp-content/plugins/([a-z0-9][a-z0-9\-_]+)/[^"\']*?(?:\?ver=([0-9][0-9a-zA-Z.\-]*))?["\']',
+                              combined, re.I):
+            slug, ver = pm.group(1).lower(), pm.group(2)
+            if slug not in plugins or (ver and not plugins.get(slug)):
+                plugins[slug] = ver
+        slugs = list(plugins.keys())[:20]
+        latest_versions = await asyncio.gather(*[self._wp_latest_plugin(s) for s in slugs]) if slugs else []
+        detected, outdated = [], []
+        for slug, latest in zip(slugs, latest_versions):
+            ver = plugins[slug]
+            detected.append(f'{slug}{("@" + ver) if ver else ""}')
+            if ver and latest and self._ver_lt(ver, latest):
+                outdated.append(f'{slug} {ver}→{latest}')
+        plug_pts, plug_note = 10, []
+        if outdated:
+            plug_pts = 0
+            plug_note.append(f'{len(outdated)} out-of-date plugin(s): ' + '; '.join(outdated))
+        elif detected:
+            plug_note.append(f'{len(detected)} plugin(s) detected, all current/unversioned: ' + ', '.join(detected[:10]))
+        else:
+            plug_note.append('No versioned plugins exposed in the markup')
+        checks.append({'name': 'WordPress Plugin Currency', 'weight': 10, 'score': plug_pts, 'max': 10,
+                       'status': self._pts_status(plug_pts, 10), 'detail': ' | '.join(plug_note)})
+
+        info['wordpress'] = {'core_version': core_ver, 'latest_core': latest_core,
+                             'plugins': detected, 'outdated': outdated}
+        return checks
+
+    def _job_board_structure_checks(self) -> List[Dict]:
+        """Job-results structural penalties (10 pts each): board embedded in an
+        iframe, board hosted on a separate subdomain, or listings that only
+        exist after JavaScript (invisible to Google Jobs & AI crawlers)."""
+        checks: List[Dict] = []
+        soups = self._all_soups()
+        combined = self._combined_html()
+        JOBISH = re.compile(r'job|career|vacan|recruit|apply|board|position', re.I)
+
+        # 1. iframe-embedded job board
+        iframe_src = None
+        for s in soups:
+            for f in s.find_all('iframe'):
+                src = (f.get('src') or '')
+                if JOBISH.search(src):
+                    iframe_src = src
+                    break
+            if iframe_src:
+                break
+        ifr_pts = 0 if iframe_src else 10
+        ifr_note = (f'Jobs embedded via <iframe> ({iframe_src[:60]}) — iframe content is invisible to Google Jobs & AI crawlers'
+                    if iframe_src else 'No iframe-embedded job board ✓')
+        checks.append({'name': 'Job Board: Indexable Embed', 'weight': 10, 'score': ifr_pts, 'max': 10,
+                       'status': self._pts_status(ifr_pts, 10), 'detail': ifr_note})
+
+        # 2. subdomain-hosted job board
+        root = self._registrable_domain(self.parsed.netloc)
+        this_host = self.parsed.netloc.lower().split(':')[0]
+        sub_hosts = set()
+        for s in soups:
+            for a in s.find_all('a', href=True):
+                href = a['href']
+                if not JOBISH.search(href):
+                    continue
+                full = href if href.startswith('http') else urljoin(self.base_url, href)
+                host = urlparse(full).netloc.lower().split(':')[0]
+                if host and host != this_host and self._registrable_domain(host) == root:
+                    sub_hosts.add(host)
+        sub_pts = 0 if sub_hosts else 10
+        sub_note = (f'Job board on a separate subdomain ({", ".join(sorted(sub_hosts)[:3])}) — splits SEO authority away from your main domain'
+                    if sub_hosts else 'Jobs served on the main domain ✓')
+        checks.append({'name': 'Job Board: Same-Domain Hosting', 'weight': 10, 'score': sub_pts, 'max': 10,
+                       'status': self._pts_status(sub_pts, 10), 'detail': sub_note})
+
+        # 3. unindexable JS-only listings (present after render, absent from raw HTML)
+        JOB_TOKENS = re.compile(r'job[-_]?(title|posting|listing|result|card)|vacanc|data-job', re.I)
+        raw_has = bool(JOB_TOKENS.search(self.html or ''))
+        rendered_has = bool(self.rendered_html and JOB_TOKENS.search(self.rendered_html))
+        script_board = bool(re.search(r'<script[^>]+src=["\'][^"\']*(job|career|recruit|vacan)[^"\']*\.js', combined, re.I))
+        unindexable = (script_board or rendered_has) and not raw_has
+        uni_pts = 0 if unindexable else 10
+        uni_note = ('Job listings are injected by JavaScript and absent from the server HTML — most AI crawlers and Google Jobs cannot read them'
+                    if unindexable else 'Job content is present in the server-rendered HTML ✓')
+        checks.append({'name': 'Job Board: Crawlable Listings', 'weight': 10, 'score': uni_pts, 'max': 10,
+                       'status': self._pts_status(uni_pts, 10), 'detail': uni_note})
+        return checks
+
+    @staticmethod
+    def _title_overlap(a: str, b: str) -> float:
+        wa = set(re.findall(r'[a-z0-9]{3,}', (a or '').lower()))
+        wb = set(re.findall(r'[a-z0-9]{3,}', (b or '').lower()))
+        if not wa:
+            return 0.0
+        return len(wa & wb) / len(wa)
+
+    def _job_url_metadata_check(self) -> Dict:
+        """On a job-detail page: descriptive URL slug, self-canonical, and a
+        <title>/meta that actually reflect the JobPosting. Skips gracefully
+        (full marks + note) when no single job page was scanned."""
+        mx = 12
+        node = self._find_schema_node('JobPosting') or {}
+        job_title = (node.get('title') or '').strip() if isinstance(node.get('title'), str) else ''
+        is_job_page = bool(self.JOB_PAGE_URL.search(self.url)) or bool(job_title)
+        if not is_job_page:
+            return {'name': 'Job URL & Metadata', 'weight': mx, 'score': mx, 'max': mx,
+                    'status': self._pts_status(mx, mx),
+                    'detail': 'No single job-detail page scanned — run the grader on a job URL to audit slug, canonical and job-specific meta'}
+
+        pts, notes = 0, []
+        slug = self.parsed.path.rstrip('/').split('/')[-1]
+        if slug and re.search(r'[a-z]{3,}', slug, re.I) and not re.fullmatch(r'\d+', slug):
+            pts += 4; notes.append('Descriptive, keyworded URL slug ✓')
+        else:
+            notes.append(f'URL slug "{slug or "/"}" is an opaque ID — use a keyworded slug (e.g. /jobs/registered-nurse-sydney-12345)')
+
+        canon = self.soup.find('link', rel=lambda v: v and 'canonical' in (v if isinstance(v, str) else ' '.join(v)).lower()) if self.soup else None
+        if canon and canon.get('href'):
+            pts += 3; notes.append('Self-canonical present ✓')
+        else:
+            notes.append('No canonical tag on the job page — risks duplicate-URL dilution')
+
+        page_title = self.soup.title.get_text().strip() if (self.soup and self.soup.title) else ''
+        if job_title and page_title and self._title_overlap(job_title, page_title) >= 0.4:
+            pts += 3; notes.append('Page <title> reflects the job ✓')
+        elif job_title:
+            notes.append(f'Page <title> "{page_title[:40]}" does not reflect the job "{job_title[:40]}"')
+        else:
+            notes.append('No JobPosting title available to compare the page title against')
+
+        md = self.soup.find('meta', attrs={'name': 'description'}) if self.soup else None
+        if md and (md.get('content') or '').strip():
+            pts += 2; notes.append('Meta description present ✓')
+        else:
+            notes.append('Missing meta description on the job page')
+
+        pts = min(pts, mx)
+        return {'name': 'Job URL & Metadata', 'weight': mx, 'score': pts, 'max': mx,
+                'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
+
+    def _detect_client_logo(self) -> Optional[str]:
+        """Best-effort absolute URL for the graded site's own logo, for the
+        report header + download. Prefers Organization schema, then a logo-ish
+        <img>, then og:image, then touch icon/favicon."""
+        if not self.soup:
+            return None
+        org = self._find_schema_node('Organization') or {}
+        logo = org.get('logo')
+        if isinstance(logo, dict):
+            logo = logo.get('url')
+        if isinstance(logo, str) and logo.strip():
+            return urljoin(self.base_url, logo.strip())
+        for img in self.soup.find_all('img'):
+            hay = ' '.join(str(img.get(a, '')) for a in ('class', 'id', 'alt', 'src')).lower()
+            src = img.get('src') or img.get('data-src')
+            if 'logo' in hay and src:
+                return urljoin(self.base_url, src)
+        og = self.soup.find('meta', property='og:image') or self.soup.find('meta', attrs={'name': 'og:image'})
+        if og and og.get('content'):
+            return urljoin(self.base_url, og['content'])
+        ico = self.soup.find('link', rel=re.compile(r'apple-touch-icon|icon', re.I))
+        if ico and ico.get('href'):
+            return urljoin(self.base_url, ico['href'])
+        return urljoin(self.base_url, '/favicon.ico')
+
+    def _generate_tech_stack_summary(self) -> Dict:
+        """The closing "we can see you're on XYZ" block. Praises modern no-code
+        (Shazamme/Duda), warns on WordPress upkeep, and flags locked-down
+        proprietary / competitor recruitment platforms — always pitching the
+        Shazamme advantage."""
+        info = self._detect_site_platform()
+        plat, cat = info['platform'], info['category']
+        pitch = ('Shazamme is a modern, drag-and-drop, no-code recruitment platform: 100% editable, '
+                 'nothing locked behind a developer, structured data and job schema built in, and no '
+                 'plugins to patch or servers to secure.')
+        if cat == 'modern-nocode' and plat == 'Shazamme':
+            headline = f"You're already on Shazamme — the modern no-code recruitment platform."
+            body = ('Everything on this page is drag-and-drop and 100% editable with no code. You get built-in '
+                    'job schema, AI-ready structured data and zero plugin/security upkeep. Keep leaning into it.')
+        elif cat == 'modern-nocode':
+            headline = f"We can see you're on {plat} — a modern no-code builder."
+            body = (f'{plat} is a solid, editable no-code foundation (Shazamme is built on this class of platform). '
+                    'To win recruitment SEO/AEO, add the job-specific structured data, content streams and apply flow '
+                    'that Shazamme ships out of the box.')
+        elif cat == 'wordpress':
+            headline = "We can see you're on WordPress — and it's showing its age."
+            body = ('WordPress is now old and clunky for recruitment: every theme/plugin is another thing to update, '
+                    'secure and hope-doesn\'t-break, edits usually need a developer, and job boards are bolted on via '
+                    f'plugins rather than built in. {pitch}')
+        elif cat == 'recruitment-saas':
+            headline = f"We can see you're on {plat} — a proprietary recruitment platform."
+            body = ('Proprietary recruitment platforms lock you into their templates, their roadmap and their pricing — '
+                    f'you can\'t freely edit or own your site. {pitch}')
+        elif cat == 'proprietary':
+            headline = f"We can see you're on {plat} — a locked-down proprietary platform."
+            body = (f'{plat} boxes you into its templates and limits how much you can customise or own. '
+                    f'{pitch}')
+        elif cat == 'cms':
+            headline = f"We can see you're on {plat}."
+            body = (f'{plat} is a traditional CMS — powerful but developer-heavy to change and maintain. {pitch}')
+        else:
+            headline = "You're on a custom-built site."
+            body = ('Custom builds are flexible but every change and security fix is a developer ticket, and job SEO '
+                    f'features have to be hand-rolled. {pitch}')
+        return {'platform': plat, 'category': cat, 'headline': headline, 'body': body}
 
     # -------------------------------------------------------------------------
     # Pillar: SEO & Discoverability
@@ -2366,6 +2712,16 @@ class CareerSiteGrader:
                             'status': self._pts_status(form_pts, 10), 'detail': ' | '.join(form_notes)})
             score += form_pts; max_score += 10
 
+        # --- Job-results structural review (iframe / subdomain / crawlability) ---
+        for jb_check in self._job_board_structure_checks():
+            checks.append(jb_check)
+            score += jb_check['score']; max_score += jb_check['max']
+
+        # --- Job URL structure + job-specific metadata ---
+        ju = self._job_url_metadata_check()
+        checks.append(ju)
+        score += ju['score']; max_score += ju['max']
+
         pct = round(score / max_score * 100) if max_score else 0
         return {
             'name': 'Candidate Experience',
@@ -3358,6 +3714,11 @@ class CareerSiteGrader:
             checks.append({'name': 'Analytics & Tracking', 'weight': 10, 'score': an_pts, 'max': 10,
                             'status': self._pts_status(an_pts, 10), 'detail': an_note})
             score += an_pts; max_score += 10
+
+        # --- WordPress security: live core + plugin currency (all modes) ---
+        for wp_check in await self._wordpress_security_checks():
+            checks.append(wp_check)
+            score += wp_check['score']; max_score += wp_check['max']
 
         pct = round(score / max_score * 100) if max_score else 0
         return {
