@@ -1072,10 +1072,14 @@ hr.section-divider {
   <div class="results-header">
     <div class="container">
       <div class="results-domain">
-        <span class="material-icons-round">language</span>
+        <img id="res-logo" alt="" style="display:none;height:28px;width:auto;max-width:120px;border-radius:6px;background:#fff;padding:2px;object-fit:contain" />
+        <span class="material-icons-round" id="res-logo-fallback">language</span>
         <span id="res-domain"></span>
       </div>
       <div class="header-actions">
+        <button class="btn-ghost" id="btn-logo" onclick="downloadLogo()" style="display:none">
+          <span class="material-icons-round">image</span> Logo
+        </button>
         <button class="btn-ghost" onclick="downloadPDF()">
           <span class="material-icons-round">picture_as_pdf</span> PDF
         </button>
@@ -1183,6 +1187,11 @@ hr.section-divider {
         Priority Recommendations
       </div>
       <div class="recs-list" id="recs-list"></div>
+    </div>
+
+    <!-- Platform / tech-stack closing block -->
+    <div class="container" id="tech-stack-section" style="display:none">
+      <div id="tech-stack-block"></div>
     </div>
 
     <hr class="section-divider">
@@ -1449,6 +1458,12 @@ function renderResults(data) {
   // Header
   $('res-domain').innerHTML = escHtml(data.domain) + (data.mode ? ' <span class="mode-badge">' + escHtml(modeLabels[data.mode] || data.mode) + '</span>' : '');
 
+  // Client logo (auto-detected from the graded site) + download
+  renderClientLogo(data.client_logo);
+
+  // Platform / tech-stack closing block
+  renderTechStack(data.tech_stack_summary);
+
   // Score
   const color = gradeColor(data.overall_score);
   const gc = gradeClass(data.grade);
@@ -1583,6 +1598,46 @@ async function submitLead(e) {
 
 function downloadPDF() {
   window.print();
+}
+
+let _clientLogoUrl = null;
+function renderClientLogo(url) {
+  _clientLogoUrl = url || null;
+  const img = $('res-logo'), fb = $('res-logo-fallback'), btn = $('btn-logo');
+  if (!url) { if (btn) btn.style.display = 'none'; return; }
+  img.onload = () => {
+    img.style.display = '';
+    if (fb) fb.style.display = 'none';
+    if (btn) btn.style.display = '';
+  };
+  img.onerror = () => { img.style.display = 'none'; if (fb) fb.style.display = ''; if (btn) btn.style.display = 'none'; };
+  img.src = url;
+}
+
+function downloadLogo() {
+  if (!_clientLogoUrl) return;
+  const a = document.createElement('a');
+  a.href = _clientLogoUrl;
+  a.download = (_clientLogoUrl.split('/').pop() || 'logo').split('?')[0] || 'logo';
+  a.target = '_blank'; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+function renderTechStack(ts) {
+  const sec = $('tech-stack-section'), box = $('tech-stack-block');
+  if (!ts || !ts.headline) { if (sec) sec.style.display = 'none'; return; }
+  const good = ts.category === 'modern-nocode';
+  const accent = good ? '#22d3ee' : '#f59e0b';
+  const icon = good ? 'verified' : 'lightbulb';
+  box.innerHTML = `
+    <div style="border:1px solid ${accent}55;border-left:4px solid ${accent};border-radius:12px;padding:20px 22px;background:${accent}0d">
+      <div style="display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:8px">
+        <span class="material-icons-round" style="color:${accent};font-size:20px">${icon}</span>
+        ${escHtml(ts.headline)}
+      </div>
+      <p style="margin:0;color:var(--text2);font-size:14px;line-height:1.6">${escHtml(ts.body)}</p>
+    </div>`;
+  sec.style.display = '';
 }
 
 function timeAgo(epochSec) {
