@@ -231,6 +231,48 @@ def health():
     return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader'})
 
 
+@app.route('/api/logo')
+def api_logo():
+    """SSRF-guarded image proxy so a client's logo always loads and downloads in
+    the report, regardless of hotlink protection or CORS on the origin."""
+    import urllib.request, ipaddress, socket
+    from urllib.parse import urlparse as _up
+    src = (request.args.get('url') or '').strip()
+    if not src:
+        return ('', 400)
+    p = _up(src)
+    if p.scheme not in ('http', 'https') or not p.hostname:
+        return ('', 400)
+    try:
+        for info in socket.getaddrinfo(p.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast):
+                return ('', 400)
+    except Exception:
+        return ('', 400)
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None  # block redirects (metadata-endpoint SSRF via 30x)
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        req = urllib.request.Request(src, headers={'User-Agent': 'Mozilla/5.0 (ShazammeGrader)'})
+        with opener.open(req, timeout=8) as r:
+            ctype = (r.headers.get('content-type') or '').split(';')[0].strip()
+            if not ctype.startswith('image/'):
+                return ('', 415)
+            data = r.read(3 * 1024 * 1024 + 1)
+        if len(data) > 3 * 1024 * 1024:
+            return ('', 413)
+        resp = Response(data, mimetype=ctype)
+        resp.headers['Cache-Control'] = 'public, max-age=86400'
+        resp.headers['Access-Control-Allow-Origin'] = '*'
+        return resp
+    except Exception:
+        return ('', 502)
+
+
 @app.route('/methodology')
 def methodology():
     return send_from_directory('public', 'methodology.html')

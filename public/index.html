@@ -1010,7 +1010,7 @@ hr.section-divider {
         spellcheck="false"
         aria-label="Career site URL"
       >
-      <button type="submit" id="grade-btn" disabled>
+      <button type="submit" id="grade-btn">
         <span class="material-icons-round">insights</span>
         Grade My Site
       </button>
@@ -1602,7 +1602,7 @@ function downloadPDF() {
 
 let _clientLogoUrl = null;
 function renderClientLogo(url) {
-  _clientLogoUrl = url || null;
+  _clientLogoUrl = url ? ('/api/logo?url=' + encodeURIComponent(url)) : null;
   const img = $('res-logo'), fb = $('res-logo-fallback'), btn = $('btn-logo');
   if (!url) { if (btn) btn.style.display = 'none'; return; }
   img.onload = () => {
@@ -1611,14 +1611,14 @@ function renderClientLogo(url) {
     if (btn) btn.style.display = '';
   };
   img.onerror = () => { img.style.display = 'none'; if (fb) fb.style.display = ''; if (btn) btn.style.display = 'none'; };
-  img.src = url;
+  img.src = _clientLogoUrl;   // proxied so hotlink/CORS-protected logos still load
 }
 
 function downloadLogo() {
   if (!_clientLogoUrl) return;
   const a = document.createElement('a');
   a.href = _clientLogoUrl;
-  a.download = (_clientLogoUrl.split('/').pop() || 'logo').split('?')[0] || 'logo';
+  a.download = 'client-logo';
   a.target = '_blank'; a.rel = 'noopener';
   document.body.appendChild(a); a.click(); a.remove();
 }

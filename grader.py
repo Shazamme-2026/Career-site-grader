@@ -1498,6 +1498,24 @@ class CareerSiteGrader:
         return {'name': 'Job URL & Metadata', 'weight': mx, 'score': pts, 'max': mx,
                 'status': self._pts_status(pts, mx), 'detail': ' | '.join(notes)}
 
+    def _core_security_checks(self) -> List[Dict]:
+        """Baseline security-header signals for recruitment/career mode (general
+        mode already has a full Security pillar; HTTPS itself is already scored
+        in the Technical pillar). Ensures every report shows a security review —
+        not just WordPress sites."""
+        checks: List[Dict] = []
+        for name, key, ok_note, bad_note in [
+            ('Strict-Transport-Security', 'strict-transport-security', 'HSTS enabled ✓', 'No HSTS header — browsers can be downgraded to HTTP'),
+            ('Content-Security-Policy', 'content-security-policy', 'CSP present ✓', 'No CSP header — weaker XSS protection'),
+            ('X-Frame-Options', 'x-frame-options', 'X-Frame-Options ✓', 'Missing X-Frame-Options — clickjacking risk'),
+        ]:
+            val = self.headers.get(key, '')
+            pts = 5 if val else 0
+            checks.append({'name': name, 'weight': 5, 'score': pts, 'max': 5,
+                           'status': self._pts_status(pts, 5),
+                           'detail': (ok_note + ': ' + val[:50]) if val else bad_note})
+        return checks
+
     def _detect_client_logo(self) -> Optional[str]:
         """Best-effort absolute URL for the graded site's own logo, for the
         report header + download. Prefers Organization schema, then a logo-ish
@@ -3714,6 +3732,11 @@ class CareerSiteGrader:
             checks.append({'name': 'Analytics & Tracking', 'weight': 10, 'score': an_pts, 'max': 10,
                             'status': self._pts_status(an_pts, 10), 'detail': an_note})
             score += an_pts; max_score += 10
+
+        # --- Baseline security (recruitment/career; general has its own pillar) ---
+        if self.mode != 'general':
+            for sec in self._core_security_checks():
+                checks.append(sec); score += sec['score']; max_score += sec['max']
 
         # --- WordPress security: live core + plugin currency (all modes) ---
         for wp_check in await self._wordpress_security_checks():
