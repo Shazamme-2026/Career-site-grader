@@ -24,6 +24,8 @@
   --amber:      #d97706;
   --rose:       #e11d48;
   --indigo:     #4f46e5;
+  --pink:       #ec2baf;
+  --pink-l:     #d612cd;
   --text:       #0f172a;
   --text2:      #475569;
   --text3:      #94a3b8;
@@ -66,7 +68,7 @@ body {
   top: 50%; right: -150px; animation-delay: -7s;
 }
 .mesh-blob:nth-child(3) {
-  width: 400px; height: 400px; background: var(--indigo);
+  width: 400px; height: 400px; background: var(--pink);
   bottom: -100px; left: 30%; animation-delay: -14s;
 }
 @keyframes drift {
@@ -105,7 +107,7 @@ body {
   margin-bottom: 24px;
 }
 .hero-title .grad {
-  background: linear-gradient(135deg, var(--purple-l) 0%, var(--cyan) 100%);
+  background: linear-gradient(120deg, var(--purple-l) 0%, var(--pink) 50%, var(--cyan) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -161,7 +163,7 @@ body {
 
 #grade-btn {
   display: flex; align-items: center; gap: 8px;
-  background: linear-gradient(135deg, var(--purple) 0%, #6d28d9 100%);
+  background: linear-gradient(120deg, var(--purple) 0%, var(--pink) 115%);
   color: #fff;
   border: none;
   padding: 0 28px;
@@ -255,9 +257,9 @@ body {
   --card-grad: linear-gradient(135deg, #06b6d4 0%, #4f46e5 100%);
 }
 .mode-career {
-  --card-accent: var(--purple); --card-ring: rgba(124,58,237,0.18);
-  --card-glow: rgba(124,58,237,0.42);
-  --card-grad: linear-gradient(135deg, #8b5cf6 0%, #4f46e5 100%);
+  --card-accent: var(--pink); --card-ring: rgba(236,43,175,0.18);
+  --card-glow: rgba(236,43,175,0.42);
+  --card-grad: linear-gradient(135deg, #8b5cf6 0%, #ec2baf 100%);
 }
 .mode-web {
   --card-accent: var(--green); --card-ring: rgba(5,150,105,0.18);
