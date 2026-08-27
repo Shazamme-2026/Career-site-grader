@@ -190,27 +190,80 @@ body {
 }
 .example-links a:hover { color: var(--cyan); }
 
+.mode-eyebrow {
+  font-size: 12px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text3);
+  margin-bottom: 16px;
+}
 .mode-selector {
-  display: flex; gap: 12px; justify-content: center;
-  margin-bottom: 32px; max-width: 680px; width: 100%;
+  display: flex; gap: 14px; justify-content: center;
+  margin-bottom: 34px; max-width: 720px; width: 100%;
 }
 .mode-card {
-  flex: 1; background: rgba(15,23,42,0.03);
-  border: 1.5px solid var(--border2); border-radius: 14px;
-  padding: 18px 14px; cursor: pointer; text-align: center;
-  transition: border-color 0.2s, background 0.2s, transform 0.15s;
+  position: relative; flex: 1; isolation: isolate;
+  background: linear-gradient(180deg, rgba(255,255,255,0.92), rgba(248,250,252,0.72));
+  border: 1px solid var(--border2); border-radius: 20px;
+  padding: 26px 18px 22px; cursor: pointer; text-align: center;
+  box-shadow: 0 1px 2px rgba(15,23,42,0.05);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  transition: transform 0.35s cubic-bezier(0.22,1,0.36,1),
+              border-color 0.25s, box-shadow 0.35s;
+}
+.mode-card::before {
+  content: ''; position: absolute; inset: 0; border-radius: inherit;
+  padding: 1px; opacity: 0; transition: opacity 0.3s; pointer-events: none;
+  background: linear-gradient(180deg, rgba(255,255,255,0.9), transparent 60%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor; mask-composite: exclude;
 }
 .mode-card:hover {
-  border-color: rgba(139,92,246,0.3); background: rgba(139,92,246,0.05);
-  transform: translateY(-2px);
+  transform: translateY(-5px);
+  border-color: transparent;
+  box-shadow: 0 22px 44px -14px var(--card-glow, rgba(124,58,237,0.4));
 }
+.mode-card:hover::before { opacity: 1; }
 .mode-card.selected {
-  border-color: var(--purple); background: rgba(139,92,246,0.1);
-  box-shadow: 0 0 0 3px rgba(139,92,246,0.15);
+  border-color: var(--card-accent, var(--purple));
+  transform: translateY(-3px);
+  box-shadow: 0 0 0 3px var(--card-ring, rgba(124,58,237,0.18)),
+              0 22px 44px -16px var(--card-glow, rgba(124,58,237,0.35));
 }
-.mode-card-icon { font-size: 28px; margin-bottom: 8px; display: block; }
-.mode-card-label { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
-.mode-card-sub { font-size: 11px; color: var(--text3); line-height: 1.3; }
+
+.mode-card-icon {
+  width: 54px; height: 54px; border-radius: 16px;
+  display: grid; place-items: center; margin: 0 auto 15px; flex-shrink: 0;
+  background: var(--card-grad, linear-gradient(135deg, var(--purple), var(--cyan)));
+  box-shadow: 0 10px 22px -8px var(--card-glow, rgba(124,58,237,0.55)),
+              inset 0 1px 0 rgba(255,255,255,0.4);
+  transition: transform 0.35s cubic-bezier(0.22,1,0.36,1);
+}
+.mode-card:hover .mode-card-icon { transform: translateY(-2px) scale(1.05) rotate(-2deg); }
+.mode-card-icon svg {
+  width: 27px; height: 27px; stroke: #fff; fill: none;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.mode-card-label {
+  font-size: 15px; font-weight: 700; margin-bottom: 5px;
+  color: var(--text); letter-spacing: -0.01em;
+}
+.mode-card-sub { font-size: 12px; color: var(--text2); line-height: 1.4; }
+
+/* Per-mode accents */
+.mode-rec {
+  --card-accent: var(--cyan); --card-ring: rgba(8,145,178,0.18);
+  --card-glow: rgba(8,145,178,0.42);
+  --card-grad: linear-gradient(135deg, #06b6d4 0%, #4f46e5 100%);
+}
+.mode-career {
+  --card-accent: var(--purple); --card-ring: rgba(124,58,237,0.18);
+  --card-glow: rgba(124,58,237,0.42);
+  --card-grad: linear-gradient(135deg, #8b5cf6 0%, #4f46e5 100%);
+}
+.mode-web {
+  --card-accent: var(--green); --card-ring: rgba(5,150,105,0.18);
+  --card-glow: rgba(5,150,105,0.42);
+  --card-grad: linear-gradient(135deg, #10b981 0%, #06b6d4 100%);
+}
 .mode-badge {
   display: inline-flex; align-items: center; gap: 4px;
   background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.3);
@@ -218,7 +271,9 @@ body {
   font-weight: 600; color: var(--purple-l); margin-left: 8px;
 }
 @media (max-width: 640px) {
-  .mode-selector { flex-direction: column; gap: 8px; }
+  .mode-selector { flex-direction: column; gap: 10px; }
+  .mode-card { display: flex; align-items: center; text-align: left; gap: 15px; padding: 16px 18px; }
+  .mode-card-icon { margin: 0; width: 48px; height: 48px; }
 }
 
 /* Pillar pills */
@@ -978,25 +1033,38 @@ hr.section-divider {
   </h1>
 
   <p class="hero-sub">
-    The most comprehensive website grader on the planet. Analyse SEO, AI visibility, performance, security, and conversion — in seconds.
+    Get a brutally honest scorecard across SEO, AI visibility, performance, security and conversion — and see exactly what&rsquo;s costing you candidates, clients and rankings. Free, in seconds.
   </p>
 
   <form class="grade-form" id="grade-form" onsubmit="startGrading(event)">
+    <p class="mode-eyebrow">Free instant scorecard — what are you grading?</p>
     <div class="mode-selector">
-      <div class="mode-card" id="mode-recruitment" onclick="selectMode('recruitment')">
-        <span class="mode-card-icon">🏢</span>
-        <div class="mode-card-label" style="color:var(--cyan)">Recruitment</div>
-        <div class="mode-card-sub">Staffing & recruitment agency websites</div>
+      <div class="mode-card mode-rec" id="mode-recruitment" onclick="selectMode('recruitment')">
+        <span class="mode-card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="6" r="2.4"/><circle cx="5" cy="17.5" r="2.4"/><circle cx="19" cy="17.5" r="2.4"/><path d="M12 8.4 7 15.4M12 8.4l5 7M7.4 17.5h9.2"/></svg>
+        </span>
+        <div class="mode-card-text">
+          <div class="mode-card-label">Recruitment</div>
+          <div class="mode-card-sub">See why candidates &amp; clients choose rivals — and how to outrank them.</div>
+        </div>
       </div>
-      <div class="mode-card" id="mode-career_site" onclick="selectMode('career_site')">
-        <span class="mode-card-icon">💼</span>
-        <div class="mode-card-label" style="color:var(--purple-l)">Career Site</div>
-        <div class="mode-card-sub">Employer career pages & job portals</div>
+      <div class="mode-card mode-career" id="mode-career_site" onclick="selectMode('career_site')">
+        <span class="mode-card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M3.5 21h17"/><path d="M6 21V6l7-3v18"/><path d="M13 21V9.5l5 2V21"/><path d="M9 8h1M9 11h1M9 14h1M9 17h1"/></svg>
+        </span>
+        <div class="mode-card-text">
+          <div class="mode-card-label">Career Site</div>
+          <div class="mode-card-sub">Find the hidden friction losing great applicants at &lsquo;Apply&rsquo;.</div>
+        </div>
       </div>
-      <div class="mode-card" id="mode-general" onclick="selectMode('general')">
-        <span class="mode-card-icon">🌐</span>
-        <div class="mode-card-label" style="color:var(--green)">Website</div>
-        <div class="mode-card-sub">Any website or landing page</div>
+      <div class="mode-card mode-web" id="mode-general" onclick="selectMode('general')">
+        <span class="mode-card-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17"/><path d="M12 3.5c2.6 2.4 4 5.4 4 8.5s-1.4 6.1-4 8.5c-2.6-2.4-4-5.4-4-8.5s1.4-6.1 4-8.5Z"/></svg>
+        </span>
+        <div class="mode-card-text">
+          <div class="mode-card-label">Website</div>
+          <div class="mode-card-sub">Benchmark against the best on the web — in 60 seconds, free.</div>
+        </div>
       </div>
     </div>
     <div class="input-wrap">
@@ -1012,7 +1080,7 @@ hr.section-divider {
       >
       <button type="submit" id="grade-btn">
         <span class="material-icons-round">insights</span>
-        Grade My Site
+        Grade My Site — Free
       </button>
     </div>
     <div class="competitor-wrap">
@@ -1027,7 +1095,7 @@ hr.section-divider {
     <label class="fresh-toggle" id="fresh-toggle" title="Admin: ignore cached authority & Core Web Vitals and re-measure">
       <input type="checkbox" id="fresh-check"> Force fresh (bypass cache)
     </label>
-    <p class="example-links" id="example-links">Select a mode above to get started</p>
+    <p class="example-links" id="example-links">Pick your site type above — your free scorecard is 60 seconds away.</p>
   </form>
 
   <div class="pillars-preview">
