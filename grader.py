@@ -7,7 +7,7 @@ import re
 import ssl
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
-from typing import AsyncGenerator, Dict, Any, List, Optional
+from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
 import renderer
 
 
@@ -446,6 +446,8 @@ class CareerSiteGrader:
                'breadcrumb_pages': 0}
         h1_missing: List[str] = []
         h1_multi = 0
+        # Site-wide H1-H6 index -> duplicate headings + the pages they sit on.
+        heading_index: Dict[str, Dict] = {}
         # Recruitment content streams (employer vs jobseeker sector pages) + richness.
         emp_sectors: set = set()
         seek_sectors: set = set()
@@ -561,6 +563,7 @@ class CareerSiteGrader:
             nh = len(self.soup.find_all('h1'))
             if nh == 0: h1_missing.append('/')
             elif nh > 1: h1_multi += 1
+            self._index_page_headings(heading_index, '/', self.soup)
 
         try:
             ssl_ctx = ssl.create_default_context()
@@ -608,6 +611,7 @@ class CareerSiteGrader:
                             h1_missing.append(self._short_path(url))
                     elif nh > 1:
                         nonlocal_inc()
+                    self._index_page_headings(heading_index, self._page_label(url), soup)
                     # --- recruitment content-stream classification ---
                     title_t = soup.find('title')
                     _classify_stream(url, title_t.get_text() if title_t else '',
@@ -667,6 +671,8 @@ class CareerSiteGrader:
         cov['total_pages'] = self.total_pages or cov['pages_checked']
         cov['h1_missing'] = h1_missing
         cov['h1_multi'] = h1_multi
+        cov['duplicate_headings'] = self._duplicate_heading_report(
+            heading_index, cov['pages_checked'])
         cov['crawl_capped'] = self.total_pages > cov['pages_checked']
         streams['sectors_employer'] = sorted(emp_sectors)
         streams['sectors_jobseeker'] = sorted(seek_sectors)
@@ -1058,6 +1064,15 @@ class CareerSiteGrader:
         pages += [(k, v) for k, v in self.extra_soups.items() if v is not None]
         return pages
 
+    def _page_label(self, url: str) -> str:
+        """Path + query — /jobs?page=2 and /jobs?page=3 are different pages, so they
+        must not collapse into one label when grouping duplicate headings."""
+        try:
+            p = urlparse(url)
+            return (p.path or '/') + (f'?{p.query}' if p.query else '')
+        except Exception:
+            return self._short_path(url)
+
     def _short_path(self, label: str) -> str:
         if label == 'homepage':
             return '/'
@@ -1067,6 +1082,120 @@ class CareerSiteGrader:
             except Exception:
                 return label
         return label
+
+    # -------------------------------------------------------------------------
+    # Duplicate heading detection (every H1-H6 on every crawled page)
+    # -------------------------------------------------------------------------
+    HEADING_TAGS = ('h1', 'h2', 'h3', 'h4', 'h5', 'h6')
+    # Template chrome (nav, footer, cookie bars) repeats every heading by design —
+    # that is not duplicate content, so those headings are never indexed.
+    CHROME_CLASS = re.compile(
+        r'(^|[-_ ])(nav|navbar|navigation|menu|footer|sidebar|side-?bar|cookie|consent|'
+        r'breadcrumb|offcanvas|off-?canvas|drawer|modal|popup|site-?header|main-?header|'
+        r'top-?bar|mega-?menu|utility-?bar)([-_ ]|$)', re.I)
+    CHROME_ANCESTORS = 6            # how far up the tree we look for chrome
+    MAX_HEADINGS_PER_PAGE = 80      # bounds memory on 1500-page crawls
+    MAX_HEADING_KEYS = 20000
+    MAX_PAGES_PER_DUPLICATE = 25    # pages listed per duplicate heading
+    # A heading on this share of the site is template furniture, not a content
+    # duplicate — reported for information, never penalised.
+    TEMPLATE_SHARE = 0.6
+    TEMPLATE_MIN_PAGES = 5
+
+    def _is_chrome_heading(self, tag) -> bool:
+        node, hops = tag, 0
+        while node is not None and hops < self.CHROME_ANCESTORS:
+            if getattr(node, 'name', None) in ('nav', 'footer', 'aside'):
+                return True
+            attrs = getattr(node, 'attrs', None)
+            if attrs:
+                ident = ' '.join(attrs.get('class') or []) + ' ' + str(attrs.get('id') or '')
+                if self.CHROME_CLASS.search(ident):
+                    return True
+                if str(attrs.get('role') or '').lower() in ('navigation', 'banner', 'contentinfo'):
+                    return True
+            node, hops = node.parent, hops + 1
+        return False
+
+    def _page_headings(self, soup) -> List[Tuple[int, str]]:
+        """(level, cleaned text) for every H1-H6 on a page, chrome excluded."""
+        out: List[Tuple[int, str]] = []
+        if soup is None:
+            return out
+        for tag in soup.find_all(self.HEADING_TAGS):
+            if len(out) >= self.MAX_HEADINGS_PER_PAGE:
+                break
+            if self._is_chrome_heading(tag):
+                continue
+            text = re.sub(r'\s+', ' ', tag.get_text(' ', strip=True)).strip()
+            text = text.strip(' \u00a0-–—:|·•')
+            if len(text) < 4:
+                continue
+            out.append((int(tag.name[1]), text))
+        return out
+
+    def _index_page_headings(self, index: Dict, page: str, soup) -> None:
+        """Fold one page's headings into the site-wide duplicate index.
+        index[key] = {level, text, pages[], page_count, repeats[(page, times)]} —
+        repeats records pages carrying the SAME heading more than once."""
+        counts: Dict[str, List] = {}
+        for level, text in self._page_headings(soup):
+            key = f'h{level}|{text.lower()}'
+            if key in counts:
+                counts[key][2] += 1
+            else:
+                counts[key] = [level, text, 1]
+        for key, (level, text, times) in counts.items():
+            entry = index.get(key)
+            if entry is None:
+                if len(index) >= self.MAX_HEADING_KEYS:
+                    continue
+                entry = index[key] = {'level': level, 'text': text, 'pages': [],
+                                      'page_count': 0, 'repeats': []}
+            entry['page_count'] += 1
+            if len(entry['pages']) < self.MAX_PAGES_PER_DUPLICATE:
+                entry['pages'].append(page)
+            if times > 1 and len(entry['repeats']) < self.MAX_PAGES_PER_DUPLICATE:
+                entry['repeats'].append((page, times))
+
+    @staticmethod
+    def _first_segment(path: str) -> str:
+        seg = path.lstrip('/').split('?')[0].split('/')
+        return seg[0] if seg and seg[0] else ''
+
+    def _is_template_heading(self, entry: Dict, pages_checked: int) -> bool:
+        """A heading that repeats because a TEMPLATE renders it — site furniture, or
+        one section's page template (every /job-detail/* carrying "Job Description").
+        Template repetition is not duplicate content, so it is never penalised."""
+        count = entry['page_count']
+        if count < self.TEMPLATE_MIN_PAGES or pages_checked < self.TEMPLATE_MIN_PAGES:
+            return False
+        if count >= pages_checked * self.TEMPLATE_SHARE:
+            return True
+        segments = {self._first_segment(p) for p in entry['pages']}
+        return len(segments) == 1 and '' not in segments
+
+    def _duplicate_heading_report(self, index: Dict, pages_checked: int) -> Dict:
+        """Split the heading index into cross-page duplicates, same-page repeats and
+        template headings. Every group names the pages the duplicate sits on."""
+        cross, same_page, template = [], [], []
+        for entry in index.values():
+            count = entry['page_count']
+            is_template = count > 1 and self._is_template_heading(entry, pages_checked)
+            group = {'level': entry['level'], 'text': entry['text'],
+                     'pages': entry['pages'], 'count': count}
+            if count > 1:
+                (template if is_template else cross).append(group)
+            if entry['repeats'] and not is_template:
+                same_page.append({'level': entry['level'], 'text': entry['text'],
+                                  'pages': [f'{p} (\u00d7{n})' for p, n in entry['repeats']],
+                                  'count': len(entry['repeats'])})
+        order = lambda g: (g['level'], -g['count'], g['text'].lower())
+        cross.sort(key=order)
+        same_page.sort(key=order)
+        template.sort(key=order)
+        return {'cross_page': cross, 'same_page': same_page, 'template': template,
+                'pages_checked': pages_checked}
 
     def _get_coverage(self) -> Dict:
         """Site-wide schema coverage across every scanned page. FAQ/content metrics
@@ -1793,6 +1922,72 @@ class CareerSiteGrader:
         checks.append({'name': 'Heading Hierarchy', 'weight': heading_max, 'score': pts, 'max': heading_max,
                         'status': self._pts_status(pts, heading_max), 'detail': note})
         score += pts; max_score += heading_max
+
+        # --- Duplicate headings (H1-H6 across every page crawled) ---
+        # The same heading text on two different pages splits keyword targeting and
+        # tells Google (and AI engines) the pages cover the same thing. Report every
+        # duplicate AND the exact pages it sits on so it can be fixed.
+        dup = cov.get('duplicate_headings')
+        if not dup:                              # general mode: pages we hold soups for
+            dup_pages = self._coverage_pages()
+            dup_index: Dict[str, Dict] = {}
+            for label, s in dup_pages:
+                self._index_page_headings(
+                    dup_index, '/' if label == 'homepage' else self._page_label(label), s)
+            dup = self._duplicate_heading_report(dup_index, len(dup_pages) or 1)
+        cross, same_page, template = dup['cross_page'], dup['same_page'], dup['template']
+        dup_pages_checked = dup.get('pages_checked') or 1
+        scanned = f"{dup_pages_checked} page{'' if dup_pages_checked == 1 else 's'} scanned"
+        # One page tells us nothing about cross-page duplication — say so rather than
+        # awarding a site-wide pass we never verified.
+        single_page = dup_pages_checked < 2
+        dup_h1 = [g for g in cross if g['level'] == 1]
+        dup_rest = [g for g in cross if g['level'] > 1]
+        dup_max = 8
+        pts = dup_max
+        if single_page:
+            # Nothing cross-page to score — cap at 7 so a one-page scan never reads
+            # as a verified full-site pass.
+            pts = 7
+        if dup_h1:
+            pts -= min(5, 1 + len(dup_h1))       # duplicate H1s are the worst case
+        if dup_rest:
+            pts -= min(3, 1 + len(dup_rest) // 3)
+        if same_page:
+            pts -= 1
+        pts = max(0, pts)
+
+        def _dup_line(g):
+            shown = ', '.join(g['pages'][:8])
+            if g['count'] > len(g['pages'][:8]):
+                shown += f" +{g['count'] - len(g['pages'][:8])} more"
+            return f"H{g['level']} \u201c{g['text'][:70]}\u201d on {g['count']} pages: {shown}"
+
+        dup_items = [_dup_line(g) for g in (dup_h1 + dup_rest)[:12]]
+        dup_items += [f"H{g['level']} \u201c{g['text'][:70]}\u201d repeated within a single page: "
+                      + ', '.join(g['pages'][:8]) for g in same_page[:5]]
+        if single_page:
+            dup_notes = ['Only the homepage was scanned — cross-page duplicate headings '
+                         'not assessed (a full-site crawl runs in recruitment/career mode)']
+        elif cross:
+            dup_notes = [f'{len(cross)} heading text(s) reused on more than one page ({scanned})']
+            if dup_h1:
+                dup_notes.append(f'{len(dup_h1)} duplicated H1')
+            if dup_rest:
+                dup_notes.append(f'{len(dup_rest)} duplicated H2-H6')
+        elif same_page:
+            dup_notes = [f'No H1-H6 heading is reused across pages ({scanned})']
+        else:
+            dup_notes = [f'No duplicate H1-H6 headings across {scanned} \u2713']
+        if same_page:
+            dup_notes.append(f'{len(same_page)} heading(s) repeated within a single page')
+        if template:
+            dup_notes.append(f'{len(template)} repeated heading(s) treated as template '
+                             f'(nav/footer or a section template) and not counted')
+        checks.append({'name': 'Duplicate Headings', 'weight': dup_max, 'score': pts, 'max': dup_max,
+                        'status': self._pts_status(pts, dup_max), 'detail': ' | '.join(dup_notes),
+                        'items': dup_items or None})
+        score += pts; max_score += dup_max
 
         # --- Structured-data validity (recruitment & career) ---
         if self.mode in ('recruitment', 'career_site'):
@@ -3949,6 +4144,7 @@ class CareerSiteGrader:
         'Open Graph / Social Tags': 'og:title, og:description and og:image control how your link looks when shared on LinkedIn, WhatsApp and Slack. Add all four og tags plus a 1200×630 share image so shares render with a branded card instead of a bare URL.',
         'Canonical URL': 'A <link rel="canonical"> tells Google which URL is the master version, preventing duplicate-content dilution from tracking params or www/non-www variants. Add a self-referencing canonical to every page.',
         'Indexability': 'Controls whether Google is allowed to list the page. A "noindex" robots meta tag hides the page from search entirely — only use it on thank-you/admin pages. Make sure your money pages do NOT carry noindex.',
+        'Duplicate Headings': 'Two pages carrying the same heading text compete for the same keyword and look like duplicate content to Google and AI engines. Rewrite each listed heading so it is unique and specific to that page (e.g. "Nursing Jobs in Brisbane" and "Nursing Jobs in Perth", not "Nursing Jobs" on both). Repeated headings inside one page usually mean a template block is duplicated \u2014 fix the template. Nav/footer headings are excluded here, so everything listed is real page content.',
         'Heading Hierarchy': 'H2/H3 subheadings break content into scannable, topic-labelled sections that both readers and AI engines parse. Add 4+ descriptive H2s (and H3s beneath them) instead of a wall of text.',
         'Recruitment Content Streams': 'The #1 recruitment-SEO structure: build TWO distinct content streams — one for EMPLOYERS ("[sector] recruitment", e.g. "IT Recruitment Agency") and one for JOBSEEKERS ("[sector] jobs", e.g. "IT Jobs") — for every sector you serve. Each sector page should carry an FAQ, named consultants/specialists, JSON-LD schema, and live job listings. This captures both sides of the high-intent search market.',
         'Industry & Sector Pages': 'Dedicated pages like "Accounting Jobs" or "IT Recruitment" capture high-intent searches and are 60-80% of recruiter organic traffic. Build one SEO page per sector you recruit in, each with its own title, copy and a live job feed. Shazamme can auto-generate these.',
@@ -4038,6 +4234,7 @@ class CareerSiteGrader:
         'Canonical URL': [('Google: canonicalization', 'https://developers.google.com/search/docs/crawling-indexing/canonicalization')],
         'Indexability': [('Google: robots meta tag', 'https://developers.google.com/search/docs/crawling-indexing/robots-meta-tag')],
         'Heading Hierarchy': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
+        'Duplicate Headings': [('Google: duplicate content', 'https://developers.google.com/search/docs/crawling-indexing/consolidate-duplicate-urls')],
         'Heading Structure': [('WebAIM: headings', 'https://webaim.org/techniques/semanticstructure/')],
         'Recruitment Content Streams': [('Example: jobseeker stream', 'https://www.hays.co.uk/it-jobs'), ('Example: employer stream', 'https://www.hays.co.uk/recruitment/it')],
         'Industry & Sector Pages': [('Example: sector landing pages', 'https://www.hays.co.uk/recruitment')],
@@ -4173,6 +4370,7 @@ class CareerSiteGrader:
             'Recruitment Content Streams': 'Distinct employer + jobseeker sector pages (with FAQ, consultants, schema, jobs) are THE highest-traffic recruitment-SEO asset — they own both sides of the high-intent market',
             'Industry & Sector Pages': 'Pages like "accounting jobs" and "IT recruitment" capture high-intent keyword searches — typically 60-80% of recruiter organic traffic',
             'Indexability': 'If noindex is set, your page will not appear in any search results',
+            'Duplicate Headings': 'Duplicate H1-H6 text across pages splits keyword targeting and makes pages compete with each other',
             'Canonical URL': 'Prevents duplicate content from splitting your ranking signals',
             'Structured Data Validity': 'Valid JobPosting fields are required for Google Jobs eligibility — invalid markup gets dropped',
             'AEO / Answer-Engine Readiness': 'Summary blocks, question headings and quotable stats are what ChatGPT, Perplexity and AI Overviews actually cite',
@@ -4189,6 +4387,7 @@ class CareerSiteGrader:
             'EVP & Pay Transparency': '67% of candidates research compensation before applying — transparency wins',
             'DE&I Commitment': 'Diverse candidates actively seek out DE&I commitment before applying',
             'Mobile Readiness': '60%+ of career site visits come from mobile',
+            'Duplicate Headings': 'Duplicate H1-H6 text across pages splits keyword targeting and makes pages compete with each other',
             'Apply Flow & Job Search': 'Complex application forms cause 60% of candidates to abandon',
             'Video Content': 'Video on career sites increases application intent by 34%',
             'Live Chat & Chatbot': 'Chatbots reduce career site bounce by up to 40%',
@@ -4214,6 +4413,7 @@ class CareerSiteGrader:
             'Server Response (TTFB)': 'Each second of delay reduces conversions by 7%',
             'HTTPS / SSL': 'Non-HTTPS sites show warnings and rank lower in Google',
             'Search Functionality': 'Visitors who use search convert at 2-3× higher rates',
+            'Duplicate Headings': 'Duplicate H1-H6 text across pages splits keyword targeting and makes pages compete with each other',
         }
 
         if self.mode == 'career_site':
@@ -4260,6 +4460,7 @@ class CareerSiteGrader:
                         'impact': IMPACT.get(name, default_impact),
                         'how_to_fix': self.GUIDANCE.get(name),
                         'value': check.get('value'),
+                        'items': check.get('items'),
                         'links': links,
                     })
         order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
