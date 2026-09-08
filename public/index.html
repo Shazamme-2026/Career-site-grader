@@ -599,6 +599,9 @@ body {
 .check-body { flex: 1; min-width: 0; }
 .check-name { font-weight: 600; color: var(--text); margin-bottom: 2px; overflow-wrap: anywhere; }
 .check-detail { color: var(--text2); line-height: 1.4; font-size: 12px; overflow-wrap: anywhere; }
+.check-items { margin: 6px 0 0; padding-left: 16px; color: var(--text2); font-size: 12px;
+  line-height: 1.5; overflow-wrap: anywhere; }
+.check-items li { margin-bottom: 3px; }
 .check-help {
   display: flex; gap: 6px; margin-top: 8px; padding: 8px 10px;
   background: rgba(99,102,241,0.08); border: 1px solid rgba(99,102,241,0.22);
@@ -980,7 +983,7 @@ hr.section-divider {
   /* Readable text colours on white */
   .exec-verdict, .check-name, .pillar-name, .section-title, .score-number,
   .exec-opp-title, .rec-check, .cwv-perf-score, .cwv-metric-val, .res-domain { color: #111 !important; }
-  .check-detail, .exec-opp-why, .pillar-summary-text, .rec-detail, .rec-impact,
+  .check-detail, .check-items, .exec-opp-why, .pillar-summary-text, .rec-detail, .rec-impact,
   .bm-sub, .cwv-src, .check-help, .rec-fix, .cmp-rank { color: #333 !important; }
   .check-help { background: #f4f4ff !important; }
   .rec-fix { background: #f5f3ff !important; }
@@ -1931,6 +1934,7 @@ function makePillarCard(p) {
         <div class="check-name">${escHtml(c.name)}</div>
         <div class="check-detail">${escHtml(c.detail || '')}</div>
         ${c.value ? `<div class="check-value">${escHtml(c.value)}</div>` : ''}
+        ${(c.items && c.items.length) ? `<ul class="check-items">${c.items.map(i => `<li>${escHtml(i)}</li>`).join('')}</ul>` : ''}
         ${c.help ? `<div class="check-help"><span class="material-icons-round">lightbulb</span><span>${escHtml(c.help)}</span></div>` : ''}
       </div>
     </div>
@@ -1985,6 +1989,8 @@ function renderRecs(recs) {
               <span class="material-icons-round">${verify ? 'fact_check' : 'open_in_new'}</span>${escHtml(l.label)}</a>`;
           }).join('')}</div>` : '';
     const valHtml = r.value ? `<div class="rec-evidence">Detected: ${escHtml(r.value)}</div>` : '';
+    const itemsHtml = (r.items && r.items.length)
+      ? `<ul class="check-items">${r.items.map(i => `<li>${escHtml(i)}</li>`).join('')}</ul>` : '';
     const scoreBadge = (r.score != null && r.max) ? `<span class="rec-score">${r.score}/${r.max}</span>` : '';
     el.innerHTML = `
       <div class="rec-priority ${r.priority}">${r.priority}</div>
@@ -1993,6 +1999,7 @@ function renderRecs(recs) {
         <div class="rec-pillar" style="background:${safeColor(r.pillar_color)}18;color:${safeColor(r.pillar_color)}">${escHtml(r.pillar)}</div>
         <div class="rec-detail">${escHtml(r.detail)}</div>
         ${valHtml}
+        ${itemsHtml}
         <div class="rec-impact">
           <span class="material-icons-round">lightbulb</span>
           ${escHtml(r.impact)}
