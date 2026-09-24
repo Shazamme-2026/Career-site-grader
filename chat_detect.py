@@ -7,138 +7,187 @@ Two passes, in order:
    white-label builds, and vendors that shipped after this list was written.
 
 Only *markup* counts as evidence: script/iframe sources, element ids and
-classes, custom tag names, widget config globals and accessibility labels on
-controls. Visible copy ("come and chat to our team", a "Let's chat" heading)
-is deliberately never enough — that wording is on half the recruitment sites
-on the web and none of it means a chatbot is installed.
+classes, custom tag names, widget config attributes and the label on the
+launcher control itself. Visible copy ("come and chat to our team", a "Let's
+chat" heading) is deliberately never enough — that wording is on half the
+recruitment sites on the web and none of it means a chatbot is installed.
+
+The input is every crawled page concatenated, so it runs to megabytes and
+speed is part of the design. Nothing here sweeps the whole document with an
+expensive pattern: vendor hosts are plain substrings checked against the URLs
+harvested in one cheap pass, and the structural rules only ever run on the
+markup immediately around a "chat" or "messenger" needle, found with str.find.
 """
 
 import re
-from typing import Dict, List, NamedTuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
-# Vendor embeds we can name. Keyed on the host/global that actually ships in
-# the page, not on the marketing name.
-VENDOR_PATTERNS: Dict[str, str] = {
-    'Zammenow':           r'zammenow\.com|zmn-chat-root',
-    'Intercom':           r'intercom\.io|intercomcdn\.com|widget\.intercom|window\.intercom',
-    'Drift':              r'drift\.com|driftt\.com',
-    'Crisp':              r'crisp\.chat',
-    'Tawk.to':            r'tawk\.to|tawk_api',
-    'Zendesk':            r'zendesk\.com|zdassets\.com|zopim',
-    'LiveChat':           r'livechatinc\.com|livechat\.com',
-    'Tidio':              r'tidio\.co|tidiochat',
-    'Freshchat':          r'freshchat\.com|wchat\.freshchat',
-    'LivePerson':         r'liveperson\.net|lpsnmedia\.net',
-    'Olark':              r'olark\.com',
-    'Smartsupp':          r'smartsupp\.com|smartsuppchat',
-    'Genesys':            r'genesys\.com|genesyscloud\.com',
-    'Qualified':          r'qualified\.com',
-    'HubSpot Chat':       r'hubspot[^"\']{0,60}(?:conversations|messages)|hubspot-messages-iframe',
-    'Chatra':             r'chatra\.io|chatra\.com',
-    'JivoChat':           r'jivosite\.com|jivochat\.com',
-    'Userlike':           r'userlike\.com',
-    'HelpCrunch':         r'helpcrunch\.com',
-    'Kommunicate':        r'kommunicate\.io',
-    'Landbot':            r'landbot\.io',
-    'ManyChat':           r'manychat\.com',
-    'Chatfuel':           r'chatfuel\.com',
-    'Botpress':           r'botpress\.(?:cloud|com)|bpcontent\.cloud',
-    'Ada':                r'ada\.support|adasupport\.com',
-    'Dialogflow':         r'df-messenger|dialogflow\.com',
-    'Paradox (Olivia)':   r'paradox\.ai|olivia\.paradox',
-    'Sendbird':           r'sendbird\.com',
-    'Comm100':            r'comm100\.com|comm100vue',
-    'SnapEngage':         r'snapengage\.com',
-    'Pure Chat':          r'purechat\.com',
-    'Respond.io':         r'respond\.io|rocketbots\.io',
-    'Zoho SalesIQ':       r'salesiq\.zoho',
-    'Gorgias':            r'gorgias\.chat',
-    'Front':              r'chat\.frontapp\.com',
-    'Kustomer':           r'kustomerapp\.com|kustomer\.com',
-    'Gladly':             r'gladly\.com',
-    'Dixa':               r'dixa\.(?:io|com)',
-    'Re:amaze':           r'reamaze\.(?:com|io)',
-    'Trengo':             r'trengo\.(?:com|net)',
-    'Chaport':            r'chaport\.com',
-    'Chatwoot':           r'chatwoot',
-    'Podium':             r'podium\.com/widget|connect\.podium',
-    'Birdeye':            r'birdeye\.com/webchat|birdeye_?webchat',
-    'Tars':               r'hellotars\.com',
-    'Haptik':             r'haptik\.ai|haptikapi\.com',
-    'Verloop':            r'verloop\.io',
-    'WATI':               r'wati\.io',
-    'HighLevel Chat':     r'leadconnectorhq\.com/loader\.js',
-    'Copilot Studio':     r'copilotstudio\.microsoft\.com|powerva\.microsoft\.com',
-    'Facebook Messenger': r'fb-customerchat|customerchat\.js',
-    'ElevenLabs ConvAI':  r'elevenlabs-convai|convai-widget',
-    'Voiceflow':          r'voiceflow\.com',
-    'Tiledesk':           r'tiledesk\.com',
-    'Twilio Flex':        r'flex\.twilio\.com',
+# Where the embed loads from. Matched against the URLs harvested out of the
+# page, which is both faster and tighter than scanning the whole document:
+# "drift.com" in a blog sentence is not a Drift install.
+VENDOR_HOSTS: Dict[str, Tuple[str, ...]] = {
+    'Zammenow':           ('zammenow.com',),
+    'Intercom':           ('intercom.io', 'intercomcdn.com'),
+    'Drift':              ('drift.com', 'driftt.com'),
+    'Crisp':              ('crisp.chat',),
+    'Tawk.to':            ('tawk.to',),
+    'Zendesk':            ('zendesk.com', 'zdassets.com'),
+    'LiveChat':           ('livechatinc.com', 'livechat.com'),
+    'Tidio':              ('tidio.co',),
+    'Freshchat':          ('freshchat.com',),
+    'LivePerson':         ('liveperson.net', 'lpsnmedia.net'),
+    'Olark':              ('olark.com',),
+    'Smartsupp':          ('smartsupp.com',),
+    'Genesys':            ('genesys.com', 'genesyscloud.com'),
+    'Qualified':          ('qualified.com',),
+    'HubSpot Chat':       ('js.usemessages.com', 'hubspot.com/conversations'),
+    'Chatra':             ('chatra.io', 'chatra.com'),
+    'JivoChat':           ('jivosite.com', 'jivochat.com'),
+    'Userlike':           ('userlike.com',),
+    'HelpCrunch':         ('helpcrunch.com',),
+    'Kommunicate':        ('kommunicate.io',),
+    'Landbot':            ('landbot.io',),
+    'ManyChat':           ('manychat.com',),
+    'Chatfuel':           ('chatfuel.com',),
+    'Botpress':           ('botpress.cloud', 'botpress.com', 'bpcontent.cloud'),
+    'Ada':                ('ada.support', 'adasupport.com'),
+    'Dialogflow':         ('dialogflow.com',),
+    'Paradox (Olivia)':   ('paradox.ai', 'olivia.paradox'),
+    'Sendbird':           ('sendbird.com',),
+    'Comm100':            ('comm100.com',),
+    'SnapEngage':         ('snapengage.com',),
+    'Pure Chat':          ('purechat.com',),
+    'Respond.io':         ('respond.io', 'rocketbots.io'),
+    'Zoho SalesIQ':       ('salesiq.zoho',),
+    'Gorgias':            ('gorgias.chat',),
+    'Front':              ('chat.frontapp.com',),
+    'Kustomer':           ('kustomerapp.com', 'kustomer.com'),
+    'Gladly':             ('gladly.com',),
+    'Dixa':               ('dixa.io', 'dixa.com'),
+    'Re:amaze':           ('reamaze.com', 'reamaze.io'),
+    'Trengo':             ('trengo.com', 'trengo.net'),
+    'Chaport':            ('chaport.com',),
+    'Chatwoot':           ('chatwoot.com',),
+    'Podium':             ('podium.com/widget', 'connect.podium'),
+    'Birdeye':            ('birdeye.com/webchat',),
+    'Tars':               ('hellotars.com',),
+    'Haptik':             ('haptik.ai', 'haptikapi.com'),
+    'Verloop':            ('verloop.io',),
+    'WATI':               ('wati.io',),
+    'HighLevel Chat':     ('leadconnectorhq.com/loader.js',),
+    'Copilot Studio':     ('copilotstudio.microsoft.com', 'powerva.microsoft.com'),
+    'Facebook Messenger': ('customerchat.js',),
+    'ElevenLabs ConvAI':  ('elevenlabs.io/convai',),
+    'Voiceflow':          ('voiceflow.com',),
+    'Tiledesk':           ('tiledesk.com',),
+    'Twilio Flex':        ('flex.twilio.com',),
 }
 
-# "chat" as a whole token, plus the compounds that spell a widget. The trailing
-# guard is what keeps "chateau", "chatter" and "chatham" out.
-_CHAT_WORD = (
+# What the embed leaves behind in the page — a JS global, a mount node, a
+# custom element. These are matched against the whole document, so keep the
+# list short and each entry unmistakable.
+VENDOR_MARKERS: Dict[str, Tuple[str, ...]] = {
+    'Zammenow':           ('zmn-chat-root',),
+    'Intercom':           ('window.intercom',),
+    'Tawk.to':            ('tawk_api',),
+    'Zendesk':            ('zopim',),
+    'Tidio':              ('tidiochat',),
+    'Smartsupp':          ('smartsuppchat',),
+    'Freshchat':          ('wchat.freshchat',),
+    'HubSpot Chat':       ('hubspot-messages-iframe',),
+    'Comm100':            ('comm100vue',),
+    'Dialogflow':         ('df-messenger',),
+    'Chatwoot':           ('chatwoot',),
+    'Birdeye':            ('birdeyewebchat',),
+    'Facebook Messenger': ('fb-customerchat',),
+    'ElevenLabs ConvAI':  ('elevenlabs-convai', 'convai-widget'),
+}
+
+# The compounds that spell a widget. The guards on both ends are what keep
+# "chateau", "chatter" and "chatham" out.
+_WIDGET_COMPOUND = (
     r'(?<![a-z])'
     r'(?:live[-_]?chat|web[-_]?chat|chat[-_]?bots?|chat[-_]?widget|chat[-_]?box|'
     r'chat[-_]?window|chat[-_]?launcher|chat[-_]?bubble|chat[-_]?root|chat[-_]?frame|'
-    r'chat[-_]?container|chat[-_]?button|chat[-_]?icon|chat[-_]?app|messenger|chat)'
+    r'chat[-_]?container|chat[-_]?button|chat[-_]?icon|chat[-_]?app)'
     r'(?![a-z])'
 )
 
-# Same, minus the bare "chat" — for attributes a page author writes for their
-# own reasons. An <h2 id="lets-chat"> is a heading slug, not a widget.
-_CHAT_WIDGET_WORD = (
-    r'(?<![a-z])'
-    r'(?:live[-_]?chat|web[-_]?chat|chat[-_]?bots?|chat[-_]?widget|chat[-_]?box|'
-    r'chat[-_]?window|chat[-_]?launcher|chat[-_]?bubble|chat[-_]?root|chat[-_]?frame|'
-    r'chat[-_]?container|chat[-_]?button|chat[-_]?icon|chat[-_]?app|messenger)'
-    r'(?![a-z])'
-)
+# In a script/iframe URL, bare "chat" is allowed as a filename stem (chat.js)
+# but not as a path word — /blog/lets-chat-about-hiring is an article.
+_SRC_CHAT = _WIDGET_COMPOUND + r'|(?<![a-z])chat(?=\.(?:min\.)?js\b)|(?<![a-z])messenger(?![a-z])'
+
+# A hyphenated tag name is already proof of a web component, so "messenger"
+# alone is safe there — unlike in a class, where it is a social icon.
+_ELEMENT_CHAT = _WIDGET_COMPOUND + r'|(?<![a-z])messenger(?![a-z])'
 
 GENERIC_PATTERNS: Dict[str, str] = {
     # A script or iframe whose URL is about chat. Only src — an <a href> to
     # /lets-chat is a page, not an embed.
     'chat script/iframe embed':
-        r'<(?:script|iframe)\b[^>]*\bsrc\s*=\s*["\'][^"\']*' + _CHAT_WORD + r'[^"\']*["\']',
+        r'<(?:script|iframe)\b[^>]{0,400}?\bsrc\s*=\s*["\'][^"\']*(?:' + _SRC_CHAT + r')[^"\']*["\']',
     # A container the widget mounts into, or the whole value being just "chat".
     'chat widget container':
-        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\']*' + _CHAT_WIDGET_WORD +
-        r'[^"\']*["\']'
+        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\']*(?:' + _WIDGET_COMPOUND +
+        r')[^"\']*["\']'
         r'|\b(?:id|class)\s*=\s*["\']\s*chat\s*["\']',
-    # Config the embed reads before it boots.
+    # Config the embed reads before it boots. data-chat, data-chatbot-id — but
+    # not data-chateau.
     'chat widget config':
-        r'\bdata-chat[a-z-]*\s*=|\bchat[_-]?widget[_-]?(?:settings|config|id|key)\b|'
+        r'\bdata-chat(?:bots?|widget|box)?(?:-[a-z][a-z-]*)?\s*=|'
+        r'\bchat[_-]?widget[_-]?(?:settings|config|id|key)\b|'
         r'window\.[a-z_$]*chat(?:bot|widget)[a-z_$]*\s*=',
-    # The launcher control itself.
+    # The launcher control's own label. The attribute name is anchored so
+    # data-subtitle="Live chat support" — marketing copy — stays out, and the
+    # keywords are whole words so "Em[ai]l or chat" does not qualify.
     'chat launcher control':
-        r'(?:aria-label|title)\s*=\s*["\'][^"\']{0,40}'
-        r'(?:(?:open|close|toggle|start|launch|live|ai|support)[^"\']{0,20}chat|'
-        r'chat[^"\']{0,20}(?:widget|window|bot|assistant|with us|now))',
+        r'(?<![-a-z])(?:aria-label|title)\s*=\s*["\'][^"\']{0,40}'
+        r'(?:(?<![a-z])(?:open|close|toggle|start|launch|live|ai|support)(?![a-z])'
+        r'[^"\']{0,20}(?<![a-z])chat(?![a-z])'
+        r'|(?<![a-z])chat(?![a-z])[^"\']{0,20}(?:widget|window|bot|assistant|with us|now))',
 }
 
-# WhatsApp click-to-chat only counts when it is a floating widget, never when
-# it is one more icon in a footer social row.
+# WhatsApp click-to-chat counts only as a floating widget — the link and the
+# float/widget marker must sit in the SAME anchor tag. Two independent
+# searches would pair a footer icon on the homepage with the word "widget"
+# five pages later, since the caller hands us the whole crawl at once.
 _WHATSAPP_LINK = r'wa\.me/|api\.whatsapp\.com/send|web\.whatsapp\.com/send'
-_WHATSAPP_WIDGET_CONTEXT = (
-    r'whatsapp[^"\'<>]{0,40}(?:widget|float|button|chat|bubble)|'
-    r'(?:widget|float|sticky|fixed|chat|bubble)[^"\'<>]{0,40}whatsapp'
-)
+_WHATSAPP_TAG = r'<a\b[^<>]{0,200}(?:' + _WHATSAPP_LINK + r')[^<>]{0,200}>'
+_WHATSAPP_WIDGET_MARKER = r'float|sticky|fixed|widget|bubble|chat'
 
-_COMPILED_VENDORS = [(name, re.compile(p, re.I)) for name, p in VENDOR_PATTERNS.items()]
-_COMPILED_GENERIC = [(name, re.compile(p, re.I)) for name, p in GENERIC_PATTERNS.items()]
-_COMPILED_WHATSAPP = (re.compile(_WHATSAPP_LINK, re.I), re.compile(_WHATSAPP_WIDGET_CONTEXT, re.I))
 
-# Custom elements are matched on the tag NAME, not inline in the markup regex:
-# a hyphenated name is already proof of a web component, so <chat-widget>,
-# <df-messenger> and <zapier-interfaces-chatbot-embed> all land without the
-# bare-"chat" looseness that a raw markup scan would need.
+# Every structural rule needs one of these words next to it, and str.find is
+# orders of magnitude cheaper than a regex sweep — so the words are located
+# first and the rules only ever run on the markup around them.
+_CHAT_NEEDLES = ('chat', 'messenger')
+
+_VENDOR_NAMES = list(dict.fromkeys(list(VENDOR_HOSTS) + list(VENDOR_MARKERS)))
+
+# Absolute URLs, plus the protocol-relative form as it appears in an
+# attribute. Both branches start with a literal, which is what keeps this
+# scan cheap while it shrinks a multi-MB document to a few hundred KB.
+_URL_RX = re.compile(r'https?://[^\s"\'<>]{0,90}|=["\']//[^"\']{0,90}', re.I)
+
+# How much markup around a needle a rule can see. The element can start a few
+# hundred characters earlier (<script ... src="...chat...">); the attribute
+# value itself always ends within a few dozen.
+_WINDOW_BEFORE = 400
+_WINDOW_AFTER = 120
+
+# Work ceiling for the structural pass. A page with more than this much
+# chat-adjacent markup is pathological, not a career site, and the grader is
+# fed whatever URL a stranger typed into the public form.
+_MAX_SCAN_BYTES = 2_000_000
+
+_GENERIC_SIGNALS = list(GENERIC_PATTERNS)
+_GENERIC_RX = re.compile(
+    '|'.join(f'(?P<g{i}>{p})' for i, p in enumerate(GENERIC_PATTERNS.values())), re.I)
+
 _CUSTOM_TAG_RX = re.compile(r'<((?:[a-z0-9]+-)+[a-z0-9]+)(?=[\s/>])', re.I)
-_CHAT_WIDGET_RX = re.compile(_CHAT_WIDGET_WORD, re.I)
-
-
-def _custom_chat_element(html: str) -> bool:
-    return any(_CHAT_WIDGET_RX.search(tag) for tag in _CUSTOM_TAG_RX.findall(html))
+_ELEMENT_CHAT_RX = re.compile(_ELEMENT_CHAT, re.I)
+_WHATSAPP_LITERALS = ('wa.me/', 'api.whatsapp.com/send', 'web.whatsapp.com/send')
+_WHATSAPP_TAG_RX = re.compile(_WHATSAPP_TAG, re.I)
+_WHATSAPP_MARKER_RX = re.compile(_WHATSAPP_WIDGET_MARKER, re.I)
 
 
 class ChatDetection(NamedTuple):
@@ -156,6 +205,67 @@ class ChatDetection(NamedTuple):
         return f'Live chat / chatbot detected ✓ — {self.signal} (unrecognised provider)'
 
 
+def _vendors(html: str) -> List[str]:
+    """Every vendor whose embed is present."""
+    urls = ' '.join(_URL_RX.findall(html))
+    return [name for name in _VENDOR_NAMES
+            if any(host in urls for host in VENDOR_HOSTS.get(name, ()))
+            or any(marker in html for marker in VENDOR_MARKERS.get(name, ()))]
+
+
+def _windows(html: str) -> List[Tuple[int, int]]:
+    """Merged spans of markup around every chat needle.
+
+    Merging matters: a page that says "chat" a thousand times in a row would
+    otherwise be scanned a thousand times over. Merged, the work is capped at
+    one pass over the document however the needles are distributed.
+    """
+    starts: List[int] = []
+    for needle in _CHAT_NEEDLES:
+        at = html.find(needle)
+        while at != -1:
+            starts.append(at)
+            at = html.find(needle, at + len(needle))
+    if not starts:
+        return []
+
+    starts.sort()
+    spans = [[max(0, starts[0] - _WINDOW_BEFORE), starts[0] + _WINDOW_AFTER]]
+    for start in starts[1:]:
+        low, high = max(0, start - _WINDOW_BEFORE), start + _WINDOW_AFTER
+        if low <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], high)
+        else:
+            spans.append([low, high])
+    return [(low, high) for low, high in spans]
+
+
+def _generic_signal(html: str) -> Optional[str]:
+    """The first structural signal found, named for the report."""
+    budget = _MAX_SCAN_BYTES
+    for low, high in _windows(html):
+        high = min(high, low + budget)
+        match = _GENERIC_RX.search(html[low:high])
+        if match:
+            return _GENERIC_SIGNALS[int(match.lastgroup[1:])]
+        budget -= high - low
+        if budget <= 0:
+            break
+    return None
+
+
+def _custom_chat_element(html: str) -> bool:
+    return any(_ELEMENT_CHAT_RX.search(tag) for tag in _CUSTOM_TAG_RX.findall(html))
+
+
+def _floating_whatsapp(html: str) -> bool:
+    # The cheap literal scan gates the pricier tag scan: almost no page has a
+    # WhatsApp link at all.
+    if not any(literal in html for literal in _WHATSAPP_LITERALS):
+        return False
+    return any(_WHATSAPP_MARKER_RX.search(tag) for tag in _WHATSAPP_TAG_RX.findall(html))
+
+
 def detect_chat(html: str) -> ChatDetection:
     """Detect a chat/chatbot widget in page markup.
 
@@ -165,19 +275,21 @@ def detect_chat(html: str) -> ChatDetection:
     if not html:
         return ChatDetection(False, [], '')
 
-    vendors = [name for name, rx in _COMPILED_VENDORS if rx.search(html)]
+    # Vendor signatures are plain lowercase substrings, so normalise once.
+    html = html.lower()
+
+    vendors = _vendors(html)
     if vendors:
         return ChatDetection(True, vendors, 'vendor embed')
 
-    for signal, rx in _COMPILED_GENERIC:
-        if rx.search(html):
-            return ChatDetection(True, [], signal)
+    signal = _generic_signal(html)
+    if signal:
+        return ChatDetection(True, [], signal)
 
     if _custom_chat_element(html):
         return ChatDetection(True, [], 'chat custom element')
 
-    link_rx, context_rx = _COMPILED_WHATSAPP
-    if link_rx.search(html) and context_rx.search(html):
+    if _floating_whatsapp(html):
         return ChatDetection(True, ['WhatsApp'], 'floating WhatsApp chat')
 
     return ChatDetection(False, [], '')

@@ -9,7 +9,25 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from chat_detect import detect_chat  # noqa: E402
+from chat_detect import VENDOR_HOSTS, VENDOR_MARKERS, detect_chat  # noqa: E402
+
+
+class SignatureCoverage(unittest.TestCase):
+    """Hosts are matched against harvested URLs and markers against the whole
+    document, so a signature filed under the wrong one silently never fires.
+    These two tests are what make adding a vendor safe."""
+
+    def test_every_host_is_found_in_a_script_src(self):
+        for vendor, hosts in VENDOR_HOSTS.items():
+            for host in hosts:
+                found = detect_chat(f'<script src="https://{host}/embed.js"></script>').vendors
+                self.assertIn(vendor, found, f'{vendor}: host {host} not matched')
+
+    def test_every_marker_is_found_in_plain_markup(self):
+        for vendor, markers in VENDOR_MARKERS.items():
+            for marker in markers:
+                found = detect_chat(f'<div class="{marker}"></div>').vendors
+                self.assertIn(vendor, found, f'{vendor}: marker {marker} not matched')
 
 
 class VendorEmbeds(unittest.TestCase):
@@ -66,6 +84,10 @@ class VendorEmbeds(unittest.TestCase):
             'bots/cr662_copilotNew/webchat?__version__=2"></iframe>',
             'Copilot Studio')
 
+    def test_case_is_irrelevant(self):
+        self.assert_vendor(
+            '<SCRIPT SRC="https://WWW.Zammenow.COM/widget.js"></SCRIPT>', 'Zammenow')
+
     def test_reports_every_vendor_it_finds(self):
         result = detect_chat(
             '<script src="https://www.zammenow.com/widget.js"></script>'
@@ -98,6 +120,9 @@ class GenericWidgets(unittest.TestCase):
 
     def test_hyphenated_custom_element_with_attributes(self):
         self.assert_generic('<chat-widget location-id="abc123"></chat-widget>')
+
+    def test_chat_js_filename(self):
+        self.assert_generic('<script src="/js/chat.js"></script>')
 
     def test_bare_chat_container_id(self):
         self.assert_generic('<div id="chat"></div>')
@@ -142,10 +167,52 @@ class NotChat(unittest.TestCase):
             '<iframe src="/tours/chateau-estate"></iframe>'
             '<div class="chatter-feed" id="chatham-house"></div>')
 
+    def test_snapchat(self):
+        # The social pixel every other recruitment site loads.
+        self.assert_not_chat(
+            '<script src="/js/snapchat.js"></script>'
+            '<a class="social-icon snapchat" href="https://snapchat.com/add/acme">Snapchat</a>')
+
+    def test_compound_glued_into_a_longer_word(self):
+        # "chatbox"/"livechat" only count as whole words.
+        self.assert_not_chat(
+            '<div class="chatboxing-club" id="livechatterbox"></div>'
+            '<script src="/js/prechatbotic.js"></script>')
+
     def test_footer_whatsapp_social_icon(self):
         self.assert_not_chat(
             '<ul class="social-links"><li><a href="https://wa.me/61400000000">WhatsApp</a></li>'
             '<li><a href="https://facebook.com/acme">Facebook</a></li></ul>')
+
+    def test_ai_inside_another_word_is_not_a_launcher(self):
+        # "Em[ai]l or chat" — the launcher keywords have to be whole words.
+        self.assert_not_chat('<a href="/contact" title="Email or chat to a consultant">Contact</a>')
+
+    def test_marketing_copy_in_a_data_attribute(self):
+        # Only a control's own label counts, not every attribute ending in "title".
+        self.assert_not_chat(
+            '<div data-subtitle="Live chat support for every client"></div>')
+
+    def test_footer_messenger_social_icon(self):
+        self.assert_not_chat(
+            '<ul class="social"><li><a class="social-icon messenger" href="https://m.me/acme">'
+            'Messenger</a></li></ul>')
+
+    def test_blog_post_iframe_slug(self):
+        self.assert_not_chat('<iframe src="/blog/lets-chat-about-hiring"></iframe>')
+
+    def test_data_attribute_starting_with_chat(self):
+        self.assert_not_chat('<div data-chateau="loire" data-chatham="house"></div>')
+
+    def test_whatsapp_link_and_prose_on_different_pages(self):
+        # detect_chat is handed every crawled page concatenated. A plain footer
+        # link on the homepage plus unrelated prose five pages later is not a
+        # floating widget.
+        footer = ('<footer><ul class="social-links">'
+                  '<li><a href="https://wa.me/61400000000">WhatsApp</a></li></ul></footer>')
+        blog = ('<article><p>A floating contact widget is popular, and many firms '
+                'link to WhatsApp instead of building a chat stack.</p></article>')
+        self.assert_not_chat(footer + ' ' + blog)
 
     def test_ordinary_recruitment_page(self):
         self.assert_not_chat(
