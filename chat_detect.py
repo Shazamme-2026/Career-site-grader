@@ -115,7 +115,8 @@ _WIDGET_COMPOUND = (
 
 # In a script/iframe URL, bare "chat" is allowed as a filename stem (chat.js)
 # but not as a path word — /blog/lets-chat-about-hiring is an article.
-_SRC_CHAT = _WIDGET_COMPOUND + r'|(?<![a-z])chat(?=\.(?:min\.)?js\b)|(?<![a-z])messenger(?![a-z])'
+_SRC_CHAT = (_WIDGET_COMPOUND +
+             r'|(?<![a-z])(?:chat|messenger)(?=\.(?:min\.)?js\b)')
 
 # A hyphenated tag name is already proof of a web component, so "messenger"
 # alone is safe there — unlike in a class, where it is a social icon.
@@ -123,13 +124,15 @@ _ELEMENT_CHAT = _WIDGET_COMPOUND + r'|(?<![a-z])messenger(?![a-z])'
 
 GENERIC_PATTERNS: Dict[str, str] = {
     # A script or iframe whose URL is about chat. Only src — an <a href> to
-    # /lets-chat is a page, not an embed.
+    # /lets-chat is a page, not an embed. Nothing after the token is required:
+    # a widget URL can carry a hundred characters of query string, and asking
+    # for the closing quote would lose it.
     'chat script/iframe embed':
-        r'<(?:script|iframe)\b[^>]{0,400}?\bsrc\s*=\s*["\'][^"\']*(?:' + _SRC_CHAT + r')[^"\']*["\']',
+        r'<(?:script|iframe)\b[^>]{0,800}?\bsrc\s*=\s*["\'][^"\'<>]{0,300}(?:' + _SRC_CHAT + r')',
     # A container the widget mounts into, or the whole value being just "chat".
     'chat widget container':
-        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\']*(?:' + _WIDGET_COMPOUND +
-        r')[^"\']*["\']'
+        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\'<>]{0,300}(?:' +
+        _WIDGET_COMPOUND + r')'
         r'|\b(?:id|class)\s*=\s*["\']\s*chat\s*["\']',
     # Config the embed reads before it boots. data-chat, data-chatbot-id — but
     # not data-chateau.
@@ -137,23 +140,30 @@ GENERIC_PATTERNS: Dict[str, str] = {
         r'\bdata-chat(?:bots?|widget|box)?(?:-[a-z][a-z-]*)?\s*=|'
         r'\bchat[_-]?widget[_-]?(?:settings|config|id|key)\b|'
         r'window\.[a-z_$]*chat(?:bot|widget)[a-z_$]*\s*=',
-    # The launcher control's own label. The attribute name is anchored so
-    # data-subtitle="Live chat support" — marketing copy — stays out, and the
-    # keywords are whole words so "Em[ai]l or chat" does not qualify.
+    # The launcher control's own label. aria-label only: title= is a tooltip,
+    # and "Chat with us now" on a link to the contact page is not a widget.
+    # The keywords are whole words, so "Em[ai]l or chat" does not qualify.
     'chat launcher control':
-        r'(?<![-a-z])(?:aria-label|title)\s*=\s*["\'][^"\']{0,40}'
+        r'(?<![-a-z])aria-label\s*=\s*["\'][^"\']{0,40}'
         r'(?:(?<![a-z])(?:open|close|toggle|start|launch|live|ai|support)(?![a-z])'
         r'[^"\']{0,20}(?<![a-z])chat(?![a-z])'
         r'|(?<![a-z])chat(?![a-z])[^"\']{0,20}(?:widget|window|bot|assistant|with us|now))',
 }
 
-# WhatsApp click-to-chat counts only as a floating widget — the link and the
-# float/widget marker must sit in the SAME anchor tag. Two independent
-# searches would pair a footer icon on the homepage with the word "widget"
-# five pages later, since the caller hands us the whole crawl at once.
+
+# WhatsApp click-to-chat counts only as a floating widget, and the proof has
+# to be a class or id that names it — on the link or on the wrapper that
+# positions it. Anything looser turns a footer social icon into a chat
+# widget: Bootstrap's own "float-end" utility, or a wa.me link whose
+# ?text= pre-fill happens to contain the word "chat".
 _WHATSAPP_LINK = r'wa\.me/|api\.whatsapp\.com/send|web\.whatsapp\.com/send'
 _WHATSAPP_TAG = r'<a\b[^<>]{0,200}(?:' + _WHATSAPP_LINK + r')[^<>]{0,200}>'
-_WHATSAPP_WIDGET_MARKER = r'float|sticky|fixed|widget|bubble|chat'
+_WHATSAPP_WIDGET_MARKER = (
+    r'\b(?:class|id)\s*=\s*["\'][^"\']{0,100}'
+    r'(?:whatsapp[a-z0-9_-]{0,12}(?:float|fixed|sticky|widget|button|bubble|chat)'
+    r'|(?:float|fixed|sticky|widget|bubble)[a-z0-9_-]{0,12}whatsapp)')
+# How far back to look for the wrapper that carries that class.
+_WHATSAPP_WRAPPER_LOOKBACK = 250
 
 
 # Every structural rule needs one of these words next to it, and str.find is
@@ -163,21 +173,24 @@ _CHAT_NEEDLES = ('chat', 'messenger')
 
 _VENDOR_NAMES = list(dict.fromkeys(list(VENDOR_HOSTS) + list(VENDOR_MARKERS)))
 
-# Absolute URLs, plus the protocol-relative form as it appears in an
-# attribute. Both branches start with a literal, which is what keeps this
-# scan cheap while it shrinks a multi-MB document to a few hundred KB.
-_URL_RX = re.compile(r'https?://[^\s"\'<>]{0,90}|=["\']//[^"\']{0,90}', re.I)
+# Where the page loads things FROM: the markup around every "src" (which
+# covers src=, data-src= and the `el.src = "//host/..."` form in a loader
+# snippet) and every <link> tag, where a preconnect to a widget CDN shows up.
+# Deliberately not <a href> or prose: a help-centre link to acme.zendesk.com
+# is not an install. str.find keeps this to a couple of C-speed passes.
+_RESOURCE_NEEDLES = (('src', 160), ('<link', 250))
 
 # How much markup around a needle a rule can see. The element can start a few
 # hundred characters earlier (<script ... src="...chat...">); the attribute
 # value itself always ends within a few dozen.
-_WINDOW_BEFORE = 400
+_WINDOW_BEFORE = 1000
 _WINDOW_AFTER = 120
 
-# Work ceiling for the structural pass. A page with more than this much
-# chat-adjacent markup is pathological, not a career site, and the grader is
-# fed whatever URL a stranger typed into the public form.
-_MAX_SCAN_BYTES = 2_000_000
+# Work ceiling for the structural pass. A 6MB crawl of real sites produces
+# ~100KB of chat-adjacent markup, so this is five times what a career site
+# needs; a page that blows through it is pathological, and the grader is fed
+# whatever URL a stranger typed into the public form.
+_MAX_SCAN_BYTES = 500_000
 
 _GENERIC_SIGNALS = list(GENERIC_PATTERNS)
 _GENERIC_RX = re.compile(
@@ -205,12 +218,39 @@ class ChatDetection(NamedTuple):
         return f'Live chat / chatbot detected ✓ — {self.signal} (unrecognised provider)'
 
 
+# A marker only counts inside markup or code — attribute value, tag name,
+# URL path, JS property. "We compared Chatwoot and Tidio" in a blog post is
+# a sentence about chat tools, not a chat tool.
+_MARKUP_BEFORE = '"\'<=/.-_( '.replace(' ', '')
+
+
+def _marker_in_markup(html: str, marker: str) -> bool:
+    at = html.find(marker)
+    while at != -1:
+        if at == 0 or html[at - 1] in _MARKUP_BEFORE:
+            return True
+        at = html.find(marker, at + len(marker))
+    return False
+
+
+def _resource_urls(html: str) -> str:
+    """Just the markup that names something the page loads."""
+    parts: List[str] = []
+    for needle, span in _RESOURCE_NEEDLES:
+        at = html.find(needle)
+        while at != -1:
+            parts.append(html[at:at + span])
+            at = html.find(needle, at + len(needle))
+    return ' '.join(parts)
+
+
 def _vendors(html: str) -> List[str]:
     """Every vendor whose embed is present."""
-    urls = ' '.join(_URL_RX.findall(html))
+    urls = _resource_urls(html)
     return [name for name in _VENDOR_NAMES
             if any(host in urls for host in VENDOR_HOSTS.get(name, ()))
-            or any(marker in html for marker in VENDOR_MARKERS.get(name, ()))]
+            or any(_marker_in_markup(html, marker)
+                   for marker in VENDOR_MARKERS.get(name, ()))]
 
 
 def _windows(html: str) -> List[Tuple[int, int]]:
@@ -244,13 +284,14 @@ def _generic_signal(html: str) -> Optional[str]:
     """The first structural signal found, named for the report."""
     budget = _MAX_SCAN_BYTES
     for low, high in _windows(html):
-        high = min(high, low + budget)
+        # Stop on a whole window rather than scanning half of one: a clipped
+        # window can cut an attribute in two and lose a real match silently.
+        if high - low > budget:
+            break
         match = _GENERIC_RX.search(html[low:high])
         if match:
             return _GENERIC_SIGNALS[int(match.lastgroup[1:])]
         budget -= high - low
-        if budget <= 0:
-            break
     return None
 
 
@@ -263,7 +304,10 @@ def _floating_whatsapp(html: str) -> bool:
     # WhatsApp link at all.
     if not any(literal in html for literal in _WHATSAPP_LITERALS):
         return False
-    return any(_WHATSAPP_MARKER_RX.search(tag) for tag in _WHATSAPP_TAG_RX.findall(html))
+    # The positioning class often sits on the wrapper, not the link itself.
+    return any(_WHATSAPP_MARKER_RX.search(
+        html[max(0, tag.start() - _WHATSAPP_WRAPPER_LOOKBACK):tag.end()])
+        for tag in _WHATSAPP_TAG_RX.finditer(html))
 
 
 def detect_chat(html: str) -> ChatDetection:

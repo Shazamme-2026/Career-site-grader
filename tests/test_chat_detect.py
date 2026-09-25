@@ -84,6 +84,12 @@ class VendorEmbeds(unittest.TestCase):
             'bots/cr662_copilotNew/webchat?__version__=2"></iframe>',
             'Copilot Studio')
 
+    def test_loader_snippet_assigning_a_protocol_relative_src(self):
+        self.assert_vendor(
+            '<script>var s=document.createElement("script"); '
+            's.src = "//widget.intercom.io/widget/abc123"; document.body.appendChild(s);</script>',
+            'Intercom')
+
     def test_case_is_irrelevant(self):
         self.assert_vendor(
             '<SCRIPT SRC="https://WWW.Zammenow.COM/widget.js"></SCRIPT>', 'Zammenow')
@@ -136,6 +142,40 @@ class GenericWidgets(unittest.TestCase):
     def test_floating_whatsapp_widget(self):
         result = detect_chat(
             '<a class="whatsapp-float" href="https://wa.me/61400000000">Chat</a>')
+        self.assertTrue(result.found)
+        self.assertEqual(['WhatsApp'], result.vendors)
+
+    def test_container_class_with_a_long_utility_list(self):
+        # The window around the needle must not cut the attribute short.
+        self.assert_generic(
+            '<div class="chat-widget fixed bottom-6 right-6 z-50 flex h-14 w-14 items-center '
+            'justify-center rounded-full bg-indigo-600 text-white shadow-lg transition '
+            'hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-offset-2"></div>')
+
+    def test_script_src_with_a_long_query_string(self):
+        self.assert_generic(
+            '<script src="/assets/chat-widget.js?v=8&amp;site=acme&amp;region=au&amp;'
+            'theme=dark&amp;locale=en-AU&amp;build=20260925&amp;cachebust=1758777600"></script>')
+
+    def test_floating_iframe_with_a_long_attribute_list(self):
+        # Real embeds carry title/allow/sandbox/loading/style before src, which
+        # pushes the tag start far back from the "chat" in the URL.
+        style = ('position:fixed;bottom:20px;right:20px;width:60px;height:60px;border:none;'
+                 'z-index:999999;box-shadow:0 5px 40px rgba(0,0,0,.16);border-radius:50%;'
+                 'transition:all .3s ease-in-out;background:#fff;overflow:hidden;'
+                 'pointer-events:auto;-webkit-transform:translateZ(0);will-change:transform;')
+        self.assert_generic(
+            f'<iframe title="Support widget" allow="microphone; camera" '
+            f'sandbox="allow-scripts allow-same-origin allow-popups allow-forms" '
+            f'loading="lazy" allowtransparency="true" frameborder="0" scrolling="no" '
+            f'style="{style}" src="https://bots.acme.io/webchat/v2?id=9"></iframe>')
+
+    def test_floating_whatsapp_button_on_a_wrapper(self):
+        # The plugin shape in the wild: the wrapper positions it, the anchor
+        # carries nothing but the link.
+        result = detect_chat(
+            '<div class="whatsapp-float-button" style="position:fixed;bottom:20px;right:20px">'
+            '<a href="https://wa.me/61400000000"><img src="/wa-icon.svg" alt="WhatsApp"></a></div>')
         self.assertTrue(result.found)
         self.assertEqual(['WhatsApp'], result.vendors)
 
@@ -213,6 +253,31 @@ class NotChat(unittest.TestCase):
         blog = ('<article><p>A floating contact widget is popular, and many firms '
                 'link to WhatsApp instead of building a chat stack.</p></article>')
         self.assert_not_chat(footer + ' ' + blog)
+
+    def test_link_to_a_vendor_the_site_merely_mentions(self):
+        # A help-centre link and a blog mention are not installs.
+        self.assert_not_chat(
+            '<a href="https://acme.zendesk.com/hc/en-au">Help centre</a>'
+            '<p>We compared <a href="https://drift.com/blog/pricing">Drift</a> and Chatwoot.</p>')
+
+    def test_bootstrap_float_utility_on_a_whatsapp_link(self):
+        self.assert_not_chat(
+            '<a class="float-end sticky-top" href="https://wa.me/61400000000">WhatsApp</a>')
+
+    def test_contact_link_with_a_tooltip(self):
+        self.assert_not_chat('<a class="btn" href="/contact" title="Chat with us now">Contact</a>')
+
+    def test_messenger_in_a_path(self):
+        self.assert_not_chat(
+            '<iframe src="/blog/facebook-messenger-for-recruiters"></iframe>'
+            '<script src="/js/messenger-share.js"></script>')
+
+    def test_whatsapp_social_icon_with_prefilled_message(self):
+        # The ?text= pre-fill routinely contains the word "chat".
+        self.assert_not_chat(
+            '<ul class="social-links"><li><a class="social-icon" '
+            'href="https://wa.me/61400000000?text=Hi%2C%20I%27d%20like%20to%20chat%20about%20a%20role">'
+            'WhatsApp</a></li></ul>')
 
     def test_ordinary_recruitment_page(self):
         self.assert_not_chat(
