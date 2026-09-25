@@ -8,6 +8,7 @@ import ssl
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from typing import AsyncGenerator, Dict, Any, List, Optional, Tuple
+import chat_detect
 import renderer
 
 
@@ -4041,15 +4042,15 @@ class CareerSiteGrader:
         score += alert_pts; max_score += 20
 
         # --- Live Chat / Chatbot (scan all pages + JS-injected widgets) ---
-        chat_haystack = self._combined_html() + ' ' + (self.rendered_html or '').lower()
-        chat_sig = re.search(
-            r'intercom|drift\.com|crisp\.chat|tawk\.to|zendesk|livechat|tidio|freshchat|'
-            r'liveperson|olark|smartsupp|chatbot|live.?chat|chat.?widget|widget.?chat|'
-            r'genesys|qualified|hubspot.*(conversations|messages)', chat_haystack)
-        chat_pts = 20 if chat_sig else 0
-        chat_note = 'Live chat / chatbot detected ✓' if chat_sig else 'No chat/chatbot found across scanned pages'
+        # Detection lives in chat_detect: a vendor list names what it can, and a
+        # structural pass catches the in-house and white-label widgets a name
+        # list can never keep up with.
+        chat = chat_detect.detect_chat(
+            self._combined_html() + ' ' + (self.rendered_html or '').lower())
+        chat_pts = 20 if chat.found else 0
         checks.append({'name': 'Live Chat & Chatbot', 'weight': 20, 'score': chat_pts, 'max': 20,
-                        'status': self._pts_status(chat_pts, 20), 'detail': chat_note})
+                        'status': self._pts_status(chat_pts, 20), 'detail': chat.summary,
+                        'value': ', '.join(chat.vendors) if chat.vendors else None})
         score += chat_pts; max_score += 20
 
         # --- Search (general) or Job Search (recruitment/career_site) ---

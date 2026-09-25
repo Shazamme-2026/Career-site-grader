@@ -6,3 +6,4 @@ docs/
 *.pyc
 .DS_Store
 benchmarks/
+tests/
