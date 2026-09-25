@@ -1,0 +1,88 @@
+name: Release QA
+
+# Runs the moment a release is published: the unit suite at the released tag,
+# then end-to-end assertions against the live service once Railway reports it
+# is serving that exact commit. Merged is not shipped, and green unit tests
+# say nothing about what production is actually doing.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Commit the live service must report (blank = skip the wait)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  BASE: https://webgrader.shazamme.com
+  # Runs Zammenow. The site this whole check exists for.
+  CHAT_SITE: https://methodrecruitment.com.au
+  # Ours, small, and has no chat widget — the control that catches a detector
+  # which has started saying yes to everything.
+  NO_CHAT_SITE: https://zammejobs.com
+
+jobs:
+  qa:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.10'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Unit suite at the released tag
+        run: python -m unittest discover -s tests -v
+
+      - name: Wait for the release to be live
+        env:
+          WANT: ${{ github.event.inputs.sha || github.sha }}
+        run: |
+          if [ -z "$WANT" ]; then echo "No commit to wait for — skipping."; exit 0; fi
+          for i in $(seq 1 40); do
+            got=$(curl -s --max-time 20 "$BASE/health" | jq -r '.commit // "unknown"')
+            echo "attempt $i: live=$got want=$WANT"
+            [ "$got" = "$WANT" ] && exit 0
+            # An older build has no `commit` at all; keep waiting rather than
+            # QA-ing the previous release and calling it a pass.
+            sleep 15
+          done
+          echo "::error::$BASE never reported commit $WANT — the release did not roll out."
+          exit 1
+
+      - name: A site with a chatbot scores it
+        run: |
+          curl -s --max-time 420 "$BASE/api/grade?url=$CHAT_SITE&mode=recruitment" -o chat.json
+          jq -e '.pillars' chat.json > /dev/null || { echo "::error::no pillars in response"; cat chat.json | head -c 500; exit 1; }
+          jq -e '[.. | objects | select(.name == "Live Chat & Chatbot")][0]
+                 | select(.score == 20 and (.value | test("Zammenow")))' chat.json \
+            || { echo "::error::Zammenow not detected on $CHAT_SITE";
+                 jq '[.. | objects | select(.name == "Live Chat & Chatbot")][0]' chat.json; exit 1; }
+
+      - name: A site without one does not
+        run: |
+          curl -s --max-time 420 "$BASE/api/grade?url=$NO_CHAT_SITE&mode=recruitment" -o nochat.json
+          jq -e '[.. | objects | select(.name == "Live Chat & Chatbot")][0] | select(.score == 0)' nochat.json \
+            || { echo "::error::false positive — chat detected on $NO_CHAT_SITE";
+                 jq '[.. | objects | select(.name == "Live Chat & Chatbot")][0]' nochat.json; exit 1; }
+
+      # snake_case on the wire: the portal's camelCase interface is built by
+      # its own mapper (lib/webgrader-client.ts), so these are the real names.
+      - name: The report shape the client portal consumes
+        run: |
+          jq -e '(.overall_score | type == "number")
+                 and (.grade | type == "string")
+                 and (.report_id | type == "string")
+                 and (.pillars | type == "object")
+                 and ([.pillars[] | .checks | length] | add > 0)' chat.json \
+            || { echo "::error::report shape changed — lib/webgrader-client.ts in shazamme-client-portal maps overall_score/grade/pillars/report_id";
+                 jq 'keys' chat.json; exit 1; }
