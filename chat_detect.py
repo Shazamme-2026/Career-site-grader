@@ -128,10 +128,10 @@ GENERIC_PATTERNS: Dict[str, str] = {
     # a widget URL can carry a hundred characters of query string, and asking
     # for the closing quote would lose it.
     'chat script/iframe embed':
-        r'<(?:script|iframe)\b[^>]{0,800}?\bsrc\s*=\s*["\'][^"\'<>]{0,300}(?:' + _SRC_CHAT + r')',
+        r'<(?:script|iframe)\b[^>]{0,800}?\bsrc\s*=\s*["\'][^"\'<>]{0,600}(?:' + _SRC_CHAT + r')',
     # A container the widget mounts into, or the whole value being just "chat".
     'chat widget container':
-        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\'<>]{0,300}(?:' +
+        r'\b(?:id|class|data-widget|data-testid)\s*=\s*["\'][^"\'<>]{0,600}(?:' +
         _WIDGET_COMPOUND + r')'
         r'|\b(?:id|class)\s*=\s*["\']\s*chat\s*["\']',
     # Config the embed reads before it boots. data-chat, data-chatbot-id — but
@@ -180,17 +180,21 @@ _VENDOR_NAMES = list(dict.fromkeys(list(VENDOR_HOSTS) + list(VENDOR_MARKERS)))
 # is not an install. str.find keeps this to a couple of C-speed passes.
 _RESOURCE_NEEDLES = (('src', 160), ('<link', 250))
 
-# How much markup around a needle a rule can see. The element can start a few
-# hundred characters earlier (<script ... src="...chat...">); the attribute
-# value itself always ends within a few dozen.
-_WINDOW_BEFORE = 1000
+# How much markup around a needle a rule can see. This has to exceed the
+# embed rule's own reach — 800 characters of attributes plus 600 of URL or
+# class list before the token — or a widget matches the rule but not the
+# window it is scanned in.
+_WINDOW_BEFORE = 1500
 _WINDOW_AFTER = 120
 
 # Work ceiling for the structural pass. A 6MB crawl of real sites produces
-# ~100KB of chat-adjacent markup, so this is five times what a career site
-# needs; a page that blows through it is pathological, and the grader is fed
-# whatever URL a stranger typed into the public form.
-_MAX_SCAN_BYTES = 500_000
+# ~100KB of chat-adjacent markup, so this is twenty times what a career site
+# needs — deliberate headroom, because the rendered DOM is appended LAST and
+# a budget spent on ordinary "chat to our team" copy would drop exactly the
+# JS-injected widget this check exists to find. A page that still blows
+# through it is pathological, and the grader is fed whatever URL a stranger
+# typed into the public form.
+_MAX_SCAN_BYTES = 2_000_000
 
 _GENERIC_SIGNALS = list(GENERIC_PATTERNS)
 _GENERIC_RX = re.compile(
@@ -218,16 +222,28 @@ class ChatDetection(NamedTuple):
         return f'Live chat / chatbot detected ✓ — {self.signal} (unrecognised provider)'
 
 
-# A marker only counts inside markup or code — attribute value, tag name,
-# URL path, JS property. "We compared Chatwoot and Tidio" in a blog post is
-# a sentence about chat tools, not a chat tool.
-_MARKUP_BEFORE = '"\'<=/.-_( '.replace(' ', '')
+# A marker only counts inside markup or code. "We compared Chatwoot and
+# Tidio" is a sentence about chat tools, not a chat tool — and the tell is
+# that both of its neighbours are prose. One code neighbour is enough:
+# class="woot-widget-holder chatwoot", /vendor/chatwoot/sdk.js, or
+# <script>window.intercomSettings all qualify.
+_CODE_NEIGHBOUR = set('"\'=/_-()[]{}:;?&#')
+
+
+def _code_side(text: str, at: int) -> bool:
+    if not 0 <= at < len(text):
+        return False
+    char = text[at]
+    if char.isalnum() or char in _CODE_NEIGHBOUR:
+        return True
+    # A dot is member access in code and a full stop in prose.
+    return char == '.' and at + 1 < len(text) and text[at + 1].isalnum()
 
 
 def _marker_in_markup(html: str, marker: str) -> bool:
     at = html.find(marker)
     while at != -1:
-        if at == 0 or html[at - 1] in _MARKUP_BEFORE:
+        if _code_side(html, at - 1) or _code_side(html, at + len(marker)):
             return True
         at = html.find(marker, at + len(marker))
     return False
@@ -239,7 +255,11 @@ def _resource_urls(html: str) -> str:
     for needle, span in _RESOURCE_NEEDLES:
         at = html.find(needle)
         while at != -1:
-            parts.append(html[at:at + span])
+            # Stop at the end of this tag, or an <img src> would drag in the
+            # <a href> that follows it.
+            chunk = html[at:at + span]
+            end = chunk.find('>')
+            parts.append(chunk if end == -1 else chunk[:end])
             at = html.find(needle, at + len(needle))
     return ' '.join(parts)
 

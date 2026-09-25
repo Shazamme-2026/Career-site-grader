@@ -84,6 +84,19 @@ class VendorEmbeds(unittest.TestCase):
             'bots/cr662_copilotNew/webchat?__version__=2"></iframe>',
             'Copilot Studio')
 
+    def test_settings_global_right_after_a_script_tag(self):
+        self.assert_vendor('<script>window.intercomSettings={app_id:"ab12"};</script>', 'Intercom')
+
+    def test_settings_global_indented_on_its_own_line(self):
+        self.assert_vendor(
+            '<script>\n  window.intercomSettings = {app_id: "ab12"};\n</script>', 'Intercom')
+
+    def test_marker_as_one_class_among_many(self):
+        self.assert_vendor('<div class="woot-widget-holder chatwoot"></div>', 'Chatwoot')
+
+    def test_marker_in_a_script_path(self):
+        self.assert_vendor('<script src="/vendor/chatwoot/sdk.js"></script>', 'Chatwoot')
+
     def test_loader_snippet_assigning_a_protocol_relative_src(self):
         self.assert_vendor(
             '<script>var s=document.createElement("script"); '
@@ -169,6 +182,18 @@ class GenericWidgets(unittest.TestCase):
             f'sandbox="allow-scripts allow-same-origin allow-popups allow-forms" '
             f'loading="lazy" allowtransparency="true" frameborder="0" scrolling="no" '
             f'style="{style}" src="https://bots.acme.io/webchat/v2?id=9"></iframe>')
+
+    def test_iframe_with_long_attributes_and_a_long_query_string(self):
+        self.assert_generic(
+            '<iframe data-config="' + 'a' * 760 + '" '
+            'src="https://bots.acme.io/embed?token=' + 'b' * 280 + '&amp;mode=chat-widget"></iframe>')
+
+    def test_widget_after_a_crawl_full_of_chat_prose(self):
+        # The rendered DOM is appended last, so a budget spent on ordinary
+        # copy would drop exactly the JS-injected widget we are looking for.
+        page = ('<p>Come and chat with our team about your next role.</p>'
+                + '<p>Lorem ipsum dolor sit amet. </p>' * 60)
+        self.assert_generic(page * 600 + '<div id="chat-widget-root"></div>')
 
     def test_floating_whatsapp_button_on_a_wrapper(self):
         # The plugin shape in the wild: the wrapper positions it, the anchor
@@ -259,6 +284,16 @@ class NotChat(unittest.TestCase):
         self.assert_not_chat(
             '<a href="https://acme.zendesk.com/hc/en-au">Help centre</a>'
             '<p>We compared <a href="https://drift.com/blog/pricing">Drift</a> and Chatwoot.</p>')
+
+    def test_vendor_named_in_a_sentence(self):
+        self.assert_not_chat(
+            '<p>We compared Chatwoot and Tidio before choosing neither.</p>'
+            '<p>Our shortlist ended with Chatwoot.</p><li>Chatwoot</li>')
+
+    def test_image_src_followed_by_a_vendor_link(self):
+        # The harvest must stop at the end of the tag it started in.
+        self.assert_not_chat(
+            '<img src="/logo.png"> <a href="https://acme.zendesk.com/hc">Help centre</a>')
 
     def test_bootstrap_float_utility_on_a_whatsapp_link(self):
         self.assert_not_chat(
