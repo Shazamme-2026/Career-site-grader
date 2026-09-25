@@ -17,6 +17,13 @@ on:
 permissions:
   contents: read
 
+# A newer release supersedes an older one mid-QA: without this the old run
+# waits out the full ten minutes for a SHA Railway has already replaced and
+# then reports that the release did not roll out.
+concurrency:
+  group: release-qa
+  cancel-in-progress: true
+
 env:
   BASE: https://webgrader.shazamme.com
   # Runs Zammenow. The site this whole check exists for.
@@ -51,12 +58,17 @@ jobs:
         run: |
           if [ "$EVENT" = "release" ]; then WANT="$RELEASE_SHA"; else WANT="$INPUT_SHA"; fi
           if [ -z "$WANT" ]; then echo "No commit to wait for — testing whatever is live."; exit 0; fi
+          echo "WANT=$WANT" >> "$GITHUB_ENV"
+          hits=0
           for i in $(seq 1 40); do
             # Mid-swap Railway answers with an HTML error page, so jq must be
             # allowed to fail — that is the window this loop exists for.
             got=$(curl -s --max-time 20 "$BASE/health" | jq -r '.commit // "unknown"' 2>/dev/null || true)
-            echo "attempt $i: live=${got:-<no answer>} want=$WANT"
-            [ "$got" = "$WANT" ] && exit 0
+            if [ "$got" = "$WANT" ]; then hits=$((hits + 1)); else hits=0; fi
+            echo "attempt $i: live=${got:-<no answer>} want=$WANT streak=$hits"
+            # Two in a row: one match can come from the new container while the
+            # old one is still draining and serving requests.
+            [ "$hits" -ge 2 ] && exit 0
             sleep 15
           done
           echo "::error::$BASE never reported commit $WANT — the release did not roll out."
@@ -75,14 +87,19 @@ jobs:
         run: |
           curl -s --max-time 420 "$BASE/api/grade?url=$NO_CHAT_SITE&mode=recruitment" -o nochat.json
           jq -e '.pillars' nochat.json > /dev/null || { echo "::error::grade failed for $NO_CHAT_SITE"; head -c 500 nochat.json; exit 1; }
-          jq -e '[.. | objects | select(.name == "Live Chat & Chatbot")][0] | select(.score == 0)' nochat.json \
-            || { echo "::error::false positive — chat detected on $NO_CHAT_SITE";
-                 jq '[.. | objects | select(.name == "Live Chat & Chatbot")][0]' nochat.json; exit 1; }
+          check=$(jq -c '[.. | objects | select(.name == "Live Chat & Chatbot")][0] // "missing"' nochat.json)
+          if [ "$check" = '"missing"' ]; then
+            echo "::error::the Live Chat & Chatbot check is absent from the report for $NO_CHAT_SITE"; exit 1
+          fi
+          echo "$check" | jq -e 'select(.score == 0)' \
+            || { echo "::error::false positive — chat detected on $NO_CHAT_SITE: $check"; exit 1; }
 
       # snake_case on the wire: the portal's camelCase interface is built by
       # its own mapper (lib/webgrader-client.ts), so these are the real names.
       - name: The report shape the client portal consumes
+        if: always()
         run: |
+          [ -s chat.json ] || { echo "::notice::no report to check — the grade step produced nothing"; exit 0; }
           jq -e '(.overall_score | type == "number")
                  and (.grade | type == "string")
                  and (.report_id | type == "string")
@@ -90,3 +107,13 @@ jobs:
                  and ([.pillars[] | .checks | length] | add > 0)' chat.json \
             || { echo "::error::report shape changed — lib/webgrader-client.ts in shazamme-client-portal maps overall_score/grade/pillars/report_id";
                  jq 'keys' chat.json; exit 1; }
+
+      # Everything above is only evidence about the release if the same build
+      # served all of it.
+      - name: Still the release we started on
+        if: always()
+        run: |
+          if [ -z "${WANT:-}" ]; then echo "::notice::no commit was pinned — nothing to re-check"; exit 0; fi
+          got=$(curl -s --max-time 20 "$BASE/health" | jq -r '.commit // "unknown"' 2>/dev/null || true)
+          [ "$got" = "$WANT" ] \
+            || { echo "::error::the live commit changed mid-QA (now ${got:-<no answer>}, expected $WANT) — these results describe no single build"; exit 1; }
