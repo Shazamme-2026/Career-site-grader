@@ -228,7 +228,15 @@ def grade():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader'})
+    # `commit` is what makes a release verifiable: merged is not shipped, and
+    # without it nothing downstream can tell whether Railway has rolled out
+    # the build it is being asked to QA. Railway injects the SHA; locally and
+    # in any other host it is simply unknown.
+    return jsonify({
+        'status': 'ok',
+        'service': 'Shazamme Career Site Grader',
+        'commit': (os.environ.get('RAILWAY_GIT_COMMIT_SHA') or 'unknown')[:40],
+    })
 
 
 @app.route('/api/logo')
