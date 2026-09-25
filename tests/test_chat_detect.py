@@ -9,7 +9,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from chat_detect import VENDOR_HOSTS, VENDOR_MARKERS, detect_chat  # noqa: E402
+from chat_detect import (  # noqa: E402
+    MAX_SCAN_BYTES, VENDOR_HOSTS, VENDOR_MARKERS, _within_budget, detect_chat)
 
 
 class SignatureCoverage(unittest.TestCase):
@@ -28,6 +29,18 @@ class SignatureCoverage(unittest.TestCase):
             for marker in markers:
                 found = detect_chat(f'<div class="{marker}"></div>').vendors
                 self.assertIn(vendor, found, f'{vendor}: marker {marker} not matched')
+
+
+class WorkCeiling(unittest.TestCase):
+    """The grader is fed whatever URL a stranger types into the public form,
+    so the structural pass has to be bounded whatever the page contains."""
+
+    def test_an_oversized_window_is_clipped_to_the_budget(self):
+        slices = _within_budget(0, 10_000_000, MAX_SCAN_BYTES)
+        self.assertLessEqual(sum(high - low for low, high in slices), MAX_SCAN_BYTES)
+
+    def test_a_window_that_fits_is_scanned_whole(self):
+        self.assertEqual([(10, 500)], _within_budget(10, 500, MAX_SCAN_BYTES))
 
 
 class VendorEmbeds(unittest.TestCase):
@@ -93,6 +106,9 @@ class VendorEmbeds(unittest.TestCase):
 
     def test_marker_as_one_class_among_many(self):
         self.assert_vendor('<div class="woot-widget-holder chatwoot"></div>', 'Chatwoot')
+
+    def test_marker_between_two_other_classes(self):
+        self.assert_vendor('<div class="woot-widget-holder chatwoot dark-mode"></div>', 'Chatwoot')
 
     def test_marker_in_a_script_path(self):
         self.assert_vendor('<script src="/vendor/chatwoot/sdk.js"></script>', 'Chatwoot')
@@ -195,6 +211,12 @@ class GenericWidgets(unittest.TestCase):
                 + '<p>Lorem ipsum dolor sit amet. </p>' * 60)
         self.assert_generic(page * 600 + '<div id="chat-widget-root"></div>')
 
+    def test_widget_after_a_crawl_of_evenly_spaced_chat_copy(self):
+        # Needles a kilobyte apart merge into one window bigger than the work
+        # ceiling — that must not abandon the scan.
+        page = '<p>We chat to candidates daily and love a good chat about careers.</p>' * 40000
+        self.assert_generic(page + '<div id="chat-widget-root"></div>')
+
     def test_floating_whatsapp_button_on_a_wrapper(self):
         # The plugin shape in the wild: the wrapper positions it, the anchor
         # carries nothing but the link.
@@ -289,6 +311,20 @@ class NotChat(unittest.TestCase):
         self.assert_not_chat(
             '<p>We compared Chatwoot and Tidio before choosing neither.</p>'
             '<p>Our shortlist ended with Chatwoot.</p><li>Chatwoot</li>')
+
+    def test_vendor_named_in_prose_beside_punctuation(self):
+        for sentence in (
+            '<p>We trialled alternatives (Chatwoot, Tidio, Crisp) before renewing.</p>',
+            '<p>We tried Chatwoot: it did not suit our team.</p>',
+            '<p>We are chatwoot-curious but have installed nothing.</p>',
+            '<p>Our shortlist [chatwoot, tidio, drift] was cut last week.</p>',
+        ):
+            self.assert_not_chat(sentence)
+
+    def test_link_to_a_vendors_own_site(self):
+        self.assert_not_chat(
+            '<a href="https://www.chatwoot.com/pricing">Chatwoot pricing</a>'
+            '<a href="https://zopim.com">Zopim</a>')
 
     def test_image_src_followed_by_a_vendor_link(self):
         # The harvest must stop at the end of the tag it started in.

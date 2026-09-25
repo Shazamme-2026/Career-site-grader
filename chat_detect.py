@@ -194,7 +194,7 @@ _WINDOW_AFTER = 120
 # JS-injected widget this check exists to find. A page that still blows
 # through it is pathological, and the grader is fed whatever URL a stranger
 # typed into the public form.
-_MAX_SCAN_BYTES = 2_000_000
+MAX_SCAN_BYTES = 2_000_000
 
 _GENERIC_SIGNALS = list(GENERIC_PATTERNS)
 _GENERIC_RX = re.compile(
@@ -222,28 +222,36 @@ class ChatDetection(NamedTuple):
         return f'Live chat / chatbot detected ✓ — {self.signal} (unrecognised provider)'
 
 
-# A marker only counts inside markup or code. "We compared Chatwoot and
-# Tidio" is a sentence about chat tools, not a chat tool — and the tell is
-# that both of its neighbours are prose. One code neighbour is enough:
-# class="woot-widget-holder chatwoot", /vendor/chatwoot/sdk.js, or
-# <script>window.intercomSettings all qualify.
-_CODE_NEIGHBOUR = set('"\'=/_-()[]{}:;?&#')
+# A marker only counts inside markup or code, and "inside" is decided by
+# where the offset sits, not by the punctuation next to it: adjacency calls
+# "(Chatwoot, Tidio)" code and `class="a chatwoot b"` prose, which is exactly
+# backwards. Scanning back to the nearest angle bracket answers it properly.
+_TAG_LOOKBACK = 2000
+_CODE_TEXT_TAGS = ('<script', '<style')
 
 
-def _code_side(text: str, at: int) -> bool:
-    if not 0 <= at < len(text):
-        return False
-    char = text[at]
-    if char.isalnum() or char in _CODE_NEIGHBOUR:
-        return True
-    # A dot is member access in code and a full stop in prose.
-    return char == '.' and at + 1 < len(text) and text[at + 1].isalnum()
+def _in_markup(html: str, at: int) -> bool:
+    floor = max(0, at - _TAG_LOOKBACK)
+    opened = html.rfind('<', floor, at)
+    closed = html.rfind('>', floor, at)
+
+    if opened > closed:
+        # Inside a tag. An <a> is the exception: a link to the vendor's own
+        # site is a link, not an install.
+        return not html.startswith('<a', opened) or html[opened + 2:opened + 3].isalnum()
+
+    if opened == -1 and closed == -1:
+        return True  # a bare script body with no markup around it
+
+    # A text node only counts when it is a script or style body.
+    tag_start = html.rfind('<', max(0, closed - _TAG_LOOKBACK), closed)
+    return tag_start != -1 and html.startswith(_CODE_TEXT_TAGS, tag_start)
 
 
 def _marker_in_markup(html: str, marker: str) -> bool:
     at = html.find(marker)
     while at != -1:
-        if _code_side(html, at - 1) or _code_side(html, at + len(marker)):
+        if _in_markup(html, at):
             return True
         at = html.find(marker, at + len(marker))
     return False
@@ -300,18 +308,31 @@ def _windows(html: str) -> List[Tuple[int, int]]:
     return [(low, high) for low, high in spans]
 
 
+def _within_budget(low: int, high: int, budget: int) -> List[Tuple[int, int]]:
+    """The parts of a window we can afford to scan.
+
+    Needles a kilobyte apart merge into one span covering the whole document,
+    so an over-budget window must not be skipped — nor scanned only from the
+    front. Both ends matter: the homepage leads the crawl and the rendered
+    DOM, where a JS-injected widget shows up, is appended last.
+    """
+    if high - low <= budget:
+        return [(low, high)]
+    half = max(1, budget // 2)
+    return [(low, low + half), (high - half, high)]
+
+
 def _generic_signal(html: str) -> Optional[str]:
     """The first structural signal found, named for the report."""
-    budget = _MAX_SCAN_BYTES
+    budget = MAX_SCAN_BYTES
     for low, high in _windows(html):
-        # Stop on a whole window rather than scanning half of one: a clipped
-        # window can cut an attribute in two and lose a real match silently.
-        if high - low > budget:
+        for slice_low, slice_high in _within_budget(low, high, budget):
+            match = _GENERIC_RX.search(html[slice_low:slice_high])
+            if match:
+                return _GENERIC_SIGNALS[int(match.lastgroup[1:])]
+        budget -= min(high - low, budget)
+        if budget <= 0:
             break
-        match = _GENERIC_RX.search(html[low:high])
-        if match:
-            return _GENERIC_SIGNALS[int(match.lastgroup[1:])]
-        budget -= high - low
     return None
 
 
