@@ -45,15 +45,18 @@ jobs:
 
       - name: Wait for the release to be live
         env:
-          WANT: ${{ github.event.inputs.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+          RELEASE_SHA: ${{ github.sha }}
+          INPUT_SHA: ${{ github.event.inputs.sha }}
         run: |
-          if [ -z "$WANT" ]; then echo "No commit to wait for — skipping."; exit 0; fi
+          if [ "$EVENT" = "release" ]; then WANT="$RELEASE_SHA"; else WANT="$INPUT_SHA"; fi
+          if [ -z "$WANT" ]; then echo "No commit to wait for — testing whatever is live."; exit 0; fi
           for i in $(seq 1 40); do
-            got=$(curl -s --max-time 20 "$BASE/health" | jq -r '.commit // "unknown"')
-            echo "attempt $i: live=$got want=$WANT"
+            # Mid-swap Railway answers with an HTML error page, so jq must be
+            # allowed to fail — that is the window this loop exists for.
+            got=$(curl -s --max-time 20 "$BASE/health" | jq -r '.commit // "unknown"' 2>/dev/null || true)
+            echo "attempt $i: live=${got:-<no answer>} want=$WANT"
             [ "$got" = "$WANT" ] && exit 0
-            # An older build has no `commit` at all; keep waiting rather than
-            # QA-ing the previous release and calling it a pass.
             sleep 15
           done
           echo "::error::$BASE never reported commit $WANT — the release did not roll out."
@@ -71,6 +74,7 @@ jobs:
       - name: A site without one does not
         run: |
           curl -s --max-time 420 "$BASE/api/grade?url=$NO_CHAT_SITE&mode=recruitment" -o nochat.json
+          jq -e '.pillars' nochat.json > /dev/null || { echo "::error::grade failed for $NO_CHAT_SITE"; head -c 500 nochat.json; exit 1; }
           jq -e '[.. | objects | select(.name == "Live Chat & Chatbot")][0] | select(.score == 0)' nochat.json \
             || { echo "::error::false positive — chat detected on $NO_CHAT_SITE";
                  jq '[.. | objects | select(.name == "Live Chat & Chatbot")][0]' nochat.json; exit 1; }
