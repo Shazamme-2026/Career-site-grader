@@ -1,0 +1,30 @@
+name: Tests
+
+# The grader has no staging: main deploys straight to Railway, so this is the
+# only gate between a pull request and webgrader.shazamme.com.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 3.11 is what nixpacks builds the service with.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # The full runtime, not just what the tests import — a dependency that
+      # stops installing should fail here, not on the next deploy.
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
