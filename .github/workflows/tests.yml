@@ -16,12 +16,12 @@ jobs:
   unittest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # 3.10 is what the service actually runs: Railway builds from the
       # Dockerfile, whose playwright/python:v1.49.0-jammy base is Python
       # 3.10.12 (verified in the image). nixpacks.toml says 3.11 and is dead.
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.10'
           cache: pip
