@@ -107,6 +107,14 @@ class VendorEmbeds(unittest.TestCase):
     def test_marker_as_one_class_among_many(self):
         self.assert_vendor('<div class="woot-widget-holder chatwoot"></div>', 'Chatwoot')
 
+    def test_global_deep_inside_a_bundle(self):
+        # Minified bundles put thousands of characters between the <script>
+        # tag and the vendor's settings object.
+        self.assert_vendor(
+            '<script>' + 'var a' + '=1;var b'.join(str(n) for n in range(600)) +
+            ';window.intercomSettings={app_id:"ab12"};</script>',
+            'Intercom')
+
     def test_marker_between_two_other_classes(self):
         self.assert_vendor('<div class="woot-widget-holder chatwoot dark-mode"></div>', 'Chatwoot')
 
@@ -217,6 +225,13 @@ class GenericWidgets(unittest.TestCase):
         page = '<p>We chat to candidates daily and love a good chat about careers.</p>' * 40000
         self.assert_generic(page + '<div id="chat-widget-root"></div>')
 
+    def test_widget_after_a_crawl_of_scattered_chat_copy(self):
+        # Thousands of separate, non-merging windows must not spend the whole
+        # budget before the rendered DOM the grader appends last.
+        page = ('<p>Chat with our friendly team about your next move.</p>'
+                + '<p>Lorem ipsum dolor sit amet consectetur. </p>' * 40)
+        self.assert_generic(page * 1300 + '<div id="chat-widget-root"></div>')
+
     def test_floating_whatsapp_button_on_a_wrapper(self):
         # The plugin shape in the wild: the wrapper positions it, the anchor
         # carries nothing but the link.
@@ -320,6 +335,21 @@ class NotChat(unittest.TestCase):
             '<p>Our shortlist [chatwoot, tidio, drift] was cut last week.</p>',
         ):
             self.assert_not_chat(sentence)
+
+    def test_vendor_named_in_a_comment(self):
+        self.assert_not_chat('<!-- 2026-03: removed chatwoot, replaced with a contact form -->')
+
+    def test_vendor_named_deep_inside_a_long_paragraph(self):
+        # Past the tag lookback the neighbours are all we have, and prose
+        # punctuation sits on one side or the other often enough that both
+        # sides have to look like code.
+        filler = 'Recruitment is a people business and our consultants know it. ' * 70
+        for sentence in (
+            'We compared Chatwoot and Tidio before choosing neither.',
+            'After a long trial we chose Chatwoot.',
+            'The shortlist (Chatwoot, Tidio) went nowhere.',
+        ):
+            self.assert_not_chat('<p>' + filler + sentence + '</p>')
 
     def test_link_to_a_vendors_own_site(self):
         self.assert_not_chat(

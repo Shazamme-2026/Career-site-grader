@@ -20,7 +20,7 @@ markup immediately around a "chat" or "messenger" needle, found with str.find.
 """
 
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 # Where the embed loads from. Matched against the URLs harvested out of the
 # page, which is both faster and tighter than scanning the whole document:
@@ -228,20 +228,33 @@ class ChatDetection(NamedTuple):
 # backwards. Scanning back to the nearest angle bracket answers it properly.
 _TAG_LOOKBACK = 2000
 _CODE_TEXT_TAGS = ('<script', '<style')
+# Used only when no angle bracket is in reach — a marker deep inside a
+# minified bundle has code on both sides; a word in a long paragraph does not.
+_CODE_NEIGHBOUR = set('"\'=/_-();:?&#.')
 
 
-def _in_markup(html: str, at: int) -> bool:
-    floor = max(0, at - _TAG_LOOKBACK)
-    opened = html.rfind('<', floor, at)
-    closed = html.rfind('>', floor, at)
+def _code_side(text: str, at: int) -> bool:
+    if not 0 <= at < len(text):
+        return False
+    return text[at].isalnum() or text[at] in _CODE_NEIGHBOUR
+
+
+def _in_markup(html: str, start: int, end: int) -> bool:
+    floor = max(0, start - _TAG_LOOKBACK)
+    opened = html.rfind('<', floor, start)
+    closed = html.rfind('>', floor, start)
 
     if opened > closed:
+        if html.startswith('<!--', opened):
+            return False  # a note about a vendor, not a vendor
         # Inside a tag. An <a> is the exception: a link to the vendor's own
         # site is a link, not an install.
         return not html.startswith('<a', opened) or html[opened + 2:opened + 3].isalnum()
 
     if opened == -1 and closed == -1:
-        return True  # a bare script body with no markup around it
+        # Out of reach of any markup: a minified bundle, or the middle of a
+        # very long paragraph. The neighbours are the only evidence left.
+        return _code_side(html, start - 1) and _code_side(html, end)
 
     # A text node only counts when it is a script or style body.
     tag_start = html.rfind('<', max(0, closed - _TAG_LOOKBACK), closed)
@@ -251,7 +264,7 @@ def _in_markup(html: str, at: int) -> bool:
 def _marker_in_markup(html: str, marker: str) -> bool:
     at = html.find(marker)
     while at != -1:
-        if _in_markup(html, at):
+        if _in_markup(html, at, at + len(marker)):
             return True
         at = html.find(marker, at + len(marker))
     return False
@@ -308,6 +321,22 @@ def _windows(html: str) -> List[Tuple[int, int]]:
     return [(low, high) for low, high in spans]
 
 
+def _from_both_ends(windows: List[Tuple[int, int]]) -> Iterator[Tuple[int, int]]:
+    """Front, back, front, back...
+
+    A crawl of thousands of pages can produce thousands of windows and spend
+    the whole budget long before the end of the document — which is where the
+    rendered DOM, and so any JS-injected widget, lives.
+    """
+    front, back = 0, len(windows) - 1
+    while front <= back:
+        yield windows[front]
+        front += 1
+        if front <= back:
+            yield windows[back]
+            back -= 1
+
+
 def _within_budget(low: int, high: int, budget: int) -> List[Tuple[int, int]]:
     """The parts of a window we can afford to scan.
 
@@ -325,7 +354,7 @@ def _within_budget(low: int, high: int, budget: int) -> List[Tuple[int, int]]:
 def _generic_signal(html: str) -> Optional[str]:
     """The first structural signal found, named for the report."""
     budget = MAX_SCAN_BYTES
-    for low, high in _windows(html):
+    for low, high in _from_both_ends(_windows(html)):
         for slice_low, slice_high in _within_budget(low, high, budget):
             match = _GENERIC_RX.search(html[slice_low:slice_high])
             if match:
