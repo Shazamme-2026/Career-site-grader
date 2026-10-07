@@ -1501,6 +1501,7 @@ function startGrading(e) {
       streamDone = true;
       evtSource.close();
       gradeData = data;
+      if (data._owner && data.report_id) { try { localStorage.setItem('grader_owner_' + data.report_id, data._owner); } catch (e) {} }
       setProgress(100);
 
       // Mark last check done
@@ -1960,7 +1961,8 @@ async function runCompare() {
   setCompetitorHint('res', 'Grading ' + urls.length + ' competitor site' + (urls.length > 1 ? 's' : '') + ' — about a minute.');
   try {
     const r = await fetch('/api/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ report_id: gradeData.report_id, competitors: urls }) });
+      body: JSON.stringify({ report_id: gradeData.report_id, competitors: urls,
+        owner: (function () { try { return localStorage.getItem('grader_owner_' + gradeData.report_id) || ''; } catch (e) { return ''; } })() }) });
     const data = await r.json();
     if (!r.ok) { setCompetitorHint('res', escHtml(data.error || 'Comparison failed.'), true); return; }
     gradeData.comparison = data.comparison;

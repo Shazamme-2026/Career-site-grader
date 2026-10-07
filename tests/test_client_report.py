@@ -134,6 +134,12 @@ class Comparison(unittest.TestCase):
         cx = next(r for r in cmp['rows'] if r['label'] == 'Candidate experience')
         self.assertEqual(cx['best'], 87)
 
+    def test_best_needs_two_scores_and_a_nonzero_value(self):
+        comp = {'target': {'domain': 'me.com', 'overall_score': 0, 'pillars': {'seo': 0}},
+                'competitors': [{'url': 'https://a.com', 'domain': 'a.com', 'error': 'x'}]}
+        cmp = client_report.comparison_rows(sample(comparison=comp))
+        self.assertTrue(all(r['best'] is None for r in cmp['rows']))
+
     def test_no_comparison_means_no_table(self):
         self.assertEqual(client_report.comparison_rows(sample()), {})
         self.assertNotIn('How you compare', client_report.build_html(sample()))

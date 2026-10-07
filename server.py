@@ -52,6 +52,15 @@ def _rate_ok(bucket: str, limit: int, window: int = 3600) -> bool:
         return True
 
 
+def _target_host(url: str) -> str:
+    from urllib.parse import urlparse as _up
+    u = url if url.lower().startswith(('http://', 'https://')) else 'https://' + url
+    try:
+        return _up(u).hostname or ''
+    except ValueError:
+        return ''
+
+
 def _report_link(report_id):
     return f'{PUBLIC_BASE_URL}/r/{report_id}' if report_id else PUBLIC_BASE_URL
 
@@ -102,12 +111,22 @@ def _persist_and_enrich(event, fallback_url, mode, bypass=False):
         pass
     if not event.get('report_id'):
         event['report_id'] = secrets.token_urlsafe(8)
+    if not event.get('_owner'):
+        event['_owner'] = secrets.token_urlsafe(16)  # lets the grader change the comparison later
     return event
+
+
+def _public(report):
+    """Stored report without server-only fields."""
+    return {k: v for k, v in (report or {}).items() if not k.startswith('_')}
 
 
 async def _grade_competitor(url: str, mode: str) -> dict:
     """Light grade (no PageSpeed) of a competitor — returns headline + pillar scores."""
     try:
+        host = _target_host(url)
+        if not host or not competitors.is_public_host(host):
+            return {'url': url, 'domain': host, 'error': 'Could not analyse this site'}
         g = CareerSiteGrader(url, mode=mode, light=True)
         final = None
         async for ev in g.grade():
@@ -126,7 +145,8 @@ async def _grade_competitor(url: str, mode: str) -> dict:
             'authority': final.get('authority'),
         }
     except Exception as e:
-        return {'url': url, 'error': str(e)}
+        print(f'[compare] {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return {'url': url, 'domain': _target_host(url), 'error': 'Could not analyse this site'}
 
 
 async def _build_comparison(competitor_urls, mode, target_event) -> dict:
@@ -195,13 +215,13 @@ def grade():
 
     # Optional competitor benchmarking (comma-separated URLs, max 3)
     raw_comp = (request.args.get('competitors') or '').strip()
-    competitors = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
+    competitors_list = competitors.clean_urls(raw_comp.split(','), _target_host(url)) if raw_comp else []
 
     bypass = _bypass_requested()
 
     def generate():
         q: queue.Queue = queue.Queue()
-        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors, q, bypass), daemon=True)
+        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors_list, q, bypass), daemon=True)
         t.start()
 
         while True:
@@ -517,7 +537,7 @@ def api_grade():
 
     bypass = _bypass_requested()
     raw_comp = (request.args.get('competitors') or '').strip()
-    comp_urls = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
+    comp_urls = competitors.clean_urls(raw_comp.split(','), _target_host(url)) if raw_comp else []
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -560,10 +580,10 @@ _competitor_cache = {}
 @app.route('/api/competitors')
 def api_competitors():
     """AI competitor finder: two direct competitors for a site (Claude + web search)."""
-    url = (request.args.get('url') or '').strip()
+    url = (request.args.get('url') or '').strip()[:competitors.MAX_URL_LEN]
     mode = (request.args.get('mode') or 'recruitment').strip()
-    if not url:
-        return jsonify({'error': 'url required'}), 400
+    if not url or mode not in VALID_MODES:
+        return jsonify({'error': 'url and a valid mode are required'}), 400
     if not url.lower().startswith(('http://', 'https://')):
         url = 'https://' + url
     if not competitors.enabled():
@@ -573,7 +593,9 @@ def api_competitors():
     with _client_pdf_lock:
         cached = _competitor_cache.get(key)
     if cached is not None:
-        return jsonify({'competitors': cached, 'cached': True})
+        found, ts = cached
+        if found or time.time() - ts < 600:  # empty answers are cached for 10 minutes
+            return jsonify({'competitors': found, 'cached': True})
     if not _rate_ok('competitors', limit=15):
         return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
     try:
@@ -581,39 +603,50 @@ def api_competitors():
     except Exception as e:
         print(f'[competitors] finder failed for {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
         return jsonify({'error': 'Could not find competitors right now. Enter them manually.'}), 502
-    if found:
-        with _client_pdf_lock:
-            _bounded_put(_competitor_cache, key, found)
+    with _client_pdf_lock:
+        _bounded_put(_competitor_cache, key, (found, time.time()))
     return jsonify({'competitors': found})
 
 
 @app.route('/api/compare', methods=['POST'])
 def api_compare():
     """Attach a competitor comparison (up to 2) to an existing stored report."""
-    data = request.get_json(silent=True) or {}
-    report_id = (data.get('report_id') or '').strip()
-    report = db.get_report(report_id) if report_id else None
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    report_id = data.get('report_id')
+    if not isinstance(report_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{4,64}', report_id):
+        return jsonify({'error': 'report not found'}), 404
+    report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'report not found'}), 404
-    urls = competitors.clean_urls(data.get('competitors') or [], report.get('domain', ''))
+    # Only the browser that ran the grade may change its comparison (reports made
+    # before owner tokens existed stay editable).
+    owner = report.get('_owner')
+    if owner and not secrets.compare_digest(str(data.get('owner') or ''), owner):
+        return jsonify({'error': 'Only the person who ran this grade can change its comparison.'}), 403
+    raw = data.get('competitors')
+    if not isinstance(raw, list) or len(raw) > 5:
+        return jsonify({'error': 'competitors must be a list of up to 5 websites.'}), 400
+    urls = competitors.clean_urls(raw, report.get('domain', ''))
     if not urls:
-        return jsonify({'error': 'Enter at least one competitor website.'}), 400
+        return jsonify({'error': 'Enter at least one competitor website that can be reached.'}), 400
     if not _rate_ok('compare', limit=20):
         return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
     mode = report.get('mode') or 'recruitment'
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        comparison = loop.run_until_complete(_build_comparison(urls, mode, report))
-    except Exception as e:
-        print(f'[compare] failed for {report_id}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
-        return jsonify({'error': 'Could not analyse the competitors. Please try again.'}), 502
-    finally:
-        loop.close()
-    updated = {**report, 'comparison': comparison}
-    db.update_report(report_id, updated)
-    with _client_pdf_lock:
-        _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison page
+    with _per_report_lock(report_id):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            comparison = loop.run_until_complete(_build_comparison(urls, mode, report))
+        except Exception as e:
+            print(f'[compare] failed for {report_id}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+            return jsonify({'error': 'Could not analyse the competitors. Please try again.'}), 502
+        finally:
+            loop.close()
+        db.set_report_comparison(report_id, comparison)
+        with _client_pdf_lock:
+            _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison table
     resp = jsonify({'ok': True, 'comparison': comparison})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
@@ -624,7 +657,7 @@ def api_report(report_id):
     report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'not found'}), 404
-    resp = jsonify(report)
+    resp = jsonify(_public(report))
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 

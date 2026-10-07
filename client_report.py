@@ -468,7 +468,8 @@ def comparison_rows(report: dict) -> dict:
 
     def row(label, getter):
         values = [getter(s) if not s.get('error') else None for s in sources]
-        best = max((v for v in values if v is not None), default=None)
+        scored = [v for v in values if v is not None]
+        best = max(scored) if len(scored) >= 2 and max(scored) > 0 else None
         return {'label': label, 'values': values, 'best': best}
 
     rows = [row('Overall', lambda s: s.get('overall_score'))]
