@@ -716,6 +716,9 @@ def build_html(report: dict, logo_src: str = None) -> str:
 
 # --- PDF ----------------------------------------------------------------------
 
+_ALLOWED_HOSTS = ('https://fonts.googleapis.com', 'https://fonts.gstatic.com')
+
+
 def _log(msg):
     print(f'[client_report] {msg}', file=sys.stderr, flush=True)
 
@@ -728,7 +731,14 @@ def render_pdf(html: str, timeout_ms: int = 30000) -> bytes:
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
         try:
             page = browser.new_page()
-            page.set_content(html, wait_until='networkidle', timeout=timeout_ms)
+            # Only the font host may be fetched; everything else is inline or data:.
+            page.route('**/*', lambda route: route.continue_()
+                       if route.request.url.startswith(_ALLOWED_HOSTS) else route.abort())
+            page.set_content(html, wait_until='load', timeout=timeout_ms)
+            try:
+                page.evaluate('document.fonts.ready')
+            except Exception:
+                pass  # fall back to the system font; never fail the PDF for a font
             page.emulate_media(media='print')
             pdf = page.pdf(format='A4', print_background=True,
                            margin={'top': '0', 'right': '0', 'bottom': '0', 'left': '0'})

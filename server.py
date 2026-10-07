@@ -284,21 +284,47 @@ def api_logo():
     return resp
 
 
-def _logo_data_uri(report):
-    """Client logo as a data URI so the PDF never depends on a third-party host."""
-    import base64
-    src = (report or {}).get('client_logo')
-    if not src:
-        return None
-    fetched = _fetch_image(src)
-    if not fetched:
-        return None
-    ctype, data = fetched
-    return f'data:{ctype};base64,' + base64.b64encode(data).decode('ascii')
-
-
+_logo_cache = {}
 _client_pdf_cache = {}
+_client_pdf_locks = {}
 _client_pdf_lock = threading.Lock()
+_RENDER_SLOTS = int(os.environ.get('CLIENT_PDF_RENDER_SLOTS', '2'))
+_render_sem = threading.BoundedSemaphore(_RENDER_SLOTS)
+
+
+def _bounded_put(cache: dict, key, value, cap: int = 50):
+    """FIFO-bounded insert. Caller holds _client_pdf_lock."""
+    if len(cache) >= cap:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _logo_data_uri(report_id, report):
+    """Client logo as a data URI so the PDF never depends on a third-party host.
+    Cached per report so the HTML and PDF routes fetch the origin at most once."""
+    import base64
+    with _client_pdf_lock:
+        if report_id in _logo_cache:
+            return _logo_cache[report_id]
+    uri = None
+    src = (report or {}).get('client_logo')
+    fetched = _fetch_image(src) if src else None
+    if fetched:
+        ctype, data = fetched
+        uri = f'data:{ctype};base64,' + base64.b64encode(data).decode('ascii')
+    with _client_pdf_lock:
+        _bounded_put(_logo_cache, report_id, uri)
+    return uri
+
+
+def _per_report_lock(report_id):
+    with _client_pdf_lock:
+        lock = _client_pdf_locks.get(report_id)
+        if lock is None:
+            if len(_client_pdf_locks) >= 200:
+                _client_pdf_locks.clear()
+            lock = _client_pdf_locks[report_id] = threading.Lock()
+        return lock
 
 
 def _client_pdf_filename(report):
@@ -313,7 +339,9 @@ def client_report_html(report_id):
     report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'not found'}), 404
-    html = client_report.build_html(report, logo_src=_logo_data_uri(report))
+    if not _rate_ok('client_html', limit=60):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
     if request.args.get('print') == '1':
         html = html.replace('</body>', '<script>window.onload=function(){window.print()}</script></body>')
     return Response(html, mimetype='text/html')
@@ -330,18 +358,26 @@ def client_report_pdf(report_id):
     if pdf is None:
         if not _rate_ok('client_pdf', limit=20):
             return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
-        html = client_report.build_html(report, logo_src=_logo_data_uri(report))
-        try:
-            pdf = client_report.render_pdf(html)
-        except Exception as e:
-            print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
-                  file=sys.stderr, flush=True)
-            return jsonify({'error': 'pdf unavailable',
-                            'fallback': f'/r/{report_id}/client?print=1'}), 503
-        with _client_pdf_lock:
-            if len(_client_pdf_cache) >= 50:
-                _client_pdf_cache.pop(next(iter(_client_pdf_cache)))
-            _client_pdf_cache[report_id] = pdf
+        # Same report: one render, the rest wait and reuse it (no stampede).
+        with _per_report_lock(report_id):
+            with _client_pdf_lock:
+                pdf = _client_pdf_cache.get(report_id)
+            if pdf is None:
+                html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+                # Cap concurrent Chromium processes across the worker.
+                if not _render_sem.acquire(timeout=5):
+                    return jsonify({'error': 'busy', 'fallback': f'/r/{report_id}/client?print=1'}), 503
+                try:
+                    pdf = client_report.render_pdf(html)
+                except Exception as e:
+                    print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
+                          file=sys.stderr, flush=True)
+                    return jsonify({'error': 'pdf unavailable',
+                                    'fallback': f'/r/{report_id}/client?print=1'}), 503
+                finally:
+                    _render_sem.release()
+                with _client_pdf_lock:
+                    _bounded_put(_client_pdf_cache, report_id, pdf)
     resp = Response(pdf, mimetype='application/pdf')
     resp.headers['Content-Disposition'] = f'attachment; filename="{_client_pdf_filename(report)}"'
     resp.headers['Cache-Control'] = 'private, max-age=86400'
