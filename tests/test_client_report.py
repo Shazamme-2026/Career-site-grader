@@ -110,6 +110,41 @@ class PillarTranslation(unittest.TestCase):
         self.assertTrue(all('GEO' not in r['label'] for r in rows))
 
 
+class Comparison(unittest.TestCase):
+    COMP = {
+        'target': {'domain': 'www.example-recruit.com', 'overall_score': 58, 'grade': 'C+',
+                   'pillars': {'seo': 57, 'geo': 41, 'cx': 87, 'brand': 60, 'technical': 64, 'conversion': 20}},
+        'competitors': [
+            {'url': 'https://a.com', 'domain': 'a.com', 'overall_score': 71, 'grade': 'B',
+             'pillars': {'seo': 70, 'geo': 50, 'cx': 80, 'brand': 70, 'technical': 75, 'conversion': 60}},
+            {'url': 'https://b.com', 'domain': 'b.com', 'error': 'timeout'},
+        ],
+        'rank': 2, 'field_size': 2,
+    }
+
+    def test_rows_use_plain_labels_and_mark_the_leader(self):
+        cmp = client_report.comparison_rows(sample(comparison=self.COMP))
+        self.assertEqual([c['label'] for c in cmp['columns']], ['You', 'a.com', 'b.com'])
+        overall = cmp['rows'][0]
+        self.assertEqual(overall['values'], [58, 71, None])
+        self.assertEqual(overall['best'], 71)
+        labels = [r['label'] for r in cmp['rows']]
+        self.assertIn('Being found by AI assistants', labels)
+        self.assertNotIn('GEO & AI Visibility', labels)
+        cx = next(r for r in cmp['rows'] if r['label'] == 'Candidate experience')
+        self.assertEqual(cx['best'], 87)
+
+    def test_no_comparison_means_no_table(self):
+        self.assertEqual(client_report.comparison_rows(sample()), {})
+        self.assertNotIn('How you compare', client_report.build_html(sample()))
+
+    def test_table_renders_in_html(self):
+        html = client_report.build_html(sample(comparison=self.COMP))
+        self.assertIn('How you compare', html)
+        self.assertIn('You rank <b>#2 of 2</b>', html)
+        self.assertIn('a.com', html)
+
+
 class Html(unittest.TestCase):
     def test_html_escapes_untrusted_report_text(self):
         html = client_report.build_html(sample(domain='<script>alert(1)</script>'))

@@ -452,6 +452,31 @@ def pillar_rows(report: dict) -> list:
     return sorted(rows, key=lambda r: r['score'])
 
 
+def comparison_rows(report: dict) -> dict:
+    """Competitor comparison in client language. Returns {} when there is none."""
+    comp = report.get('comparison') or {}
+    target = comp.get('target') or {}
+    comps = [c for c in (comp.get('competitors') or []) if c.get('url') or c.get('domain')]
+    if not target or not comps:
+        return {}
+    names = {k: PILLAR_LABELS.get(v.get('name', ''), (v.get('name', ''), ''))[0]
+             for k, v in (report.get('pillars') or {}).items()}
+    cols = [{'label': 'You', 'domain': target.get('domain', ''), 'error': None}] + [
+        {'label': c.get('domain') or c.get('url', ''), 'domain': c.get('domain') or c.get('url', ''),
+         'error': c.get('error')} for c in comps]
+    sources = [target] + comps
+
+    def row(label, getter):
+        values = [getter(s) if not s.get('error') else None for s in sources]
+        best = max((v for v in values if v is not None), default=None)
+        return {'label': label, 'values': values, 'best': best}
+
+    rows = [row('Overall', lambda s: s.get('overall_score'))]
+    for key, label in names.items():
+        rows.append(row(label, lambda s, k=key: (s.get('pillars') or {}).get(k)))
+    return {'columns': cols, 'rows': rows, 'rank': comp.get('rank'), 'field_size': comp.get('field_size')}
+
+
 def _band(score: int):
     if score >= 85:
         return ('#059669', 'Your website is already a strong performer. The opportunities '
@@ -520,15 +545,25 @@ p { font-size: 12.5px; color: #334155; }
 .verdict { font-size: 15px; color: #0f172a; line-height: 1.55; max-width: 150mm; }
 .callout { border-left: 4px solid #ec2baf; padding: 10px 16px; background: #fdf2f8; border-radius: 0 12px 12px 0;
            font-size: 13px; color: #0f172a; margin-top: 20px; }
-.pillars { display: grid; grid-template-columns: 1fr; gap: 9px; margin: 6px 0 24px; }
+.pillars { display: grid; grid-template-columns: 1fr; gap: 7px; margin: 4px 0 18px; }
 .pillar { display: grid; grid-template-columns: 62mm 1fr 14mm; align-items: center; gap: 12px; }
 .pillar .l { font-size: 12.5px; font-weight: 700; }
-.pillar .m { font-size: 10.5px; color: #64748b; font-weight: 400; display: block; }
+.pillar .m { font-size: 10px; color: #64748b; font-weight: 400; display: block; line-height: 1.35; }
 .track { height: 10px; background: #f1f5f9; border-radius: 999px; overflow: hidden; }
 .fill { height: 100%; border-radius: 999px; }
 .pillar .s { font-size: 14px; font-weight: 800; text-align: right; }
+.cmp { margin-top: 16px; }
+.cmp .note { font-size: 10px; color: #94a3b8; margin-top: 6px; }
+.cmp table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.cmp th, .cmp td { padding: 5px 10px; text-align: center; border-bottom: 1px solid rgba(15,23,42,.08); }
+.cmp th:first-child, .cmp td:first-child { text-align: left; font-weight: 600; }
+.cmp th { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #64748b; font-weight: 700; }
+.cmp th.you, .cmp td.you { background: #f5f3ff; }
+.cmp td.best { font-weight: 800; color: #059669; }
+.cmp .rank { font-size: 12px; color: #0f172a; margin: 2px 0 6px; }
+.cmp .err { color: #94a3b8; font-style: italic; }
 .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.box { border: 1px solid rgba(15,23,42,.1); border-radius: 16px; padding: 16px 18px; }
+.box { border: 1px solid rgba(15,23,42,.1); border-radius: 16px; padding: 13px 16px; }
 .box h3 { margin-bottom: 8px; }
 .box ul { padding-left: 16px; font-size: 12.5px; color: #334155; }
 .box li { margin-bottom: 4px; }
@@ -590,6 +625,31 @@ def _footer(report_link: str, page: int) -> str:
             f'<span>Full technical report: {_e(report_link)}</span><span>{page} / 4</span></div>')
 
 
+def _comparison_html(cmp: dict) -> str:
+    if not cmp:
+        return ''
+    head = ''.join(f'<th class="{"you" if i == 0 else ""}">{_e(c["label"])}</th>'
+                   for i, c in enumerate(cmp['columns']))
+    body = ''
+    for r in cmp['rows']:
+        cells = ''
+        for i, v in enumerate(r['values']):
+            cls = ('you ' if i == 0 else '') + ('best' if v is not None and v == r['best'] else '')
+            cells += f'<td class="{cls.strip()}">{v if v is not None else "<span class=err>n/a</span>"}</td>'
+        body += f'<tr><td>{_e(r["label"])}</td>{cells}</tr>'
+    rank = ''
+    if cmp.get('rank') and cmp.get('field_size'):
+        rank = (f'<div class="rank">You rank <b>#{int(cmp["rank"])} of {int(cmp["field_size"])}</b> '
+                f'on overall score. Green marks the leader on each line.</div>')
+    failed = [c['domain'] for c in cmp['columns'][1:] if c.get('error')]
+    note = ''
+    if failed:
+        note = (f'<div class="note">{_e(", ".join(failed))} could not be analysed '
+                f'(the site blocks automated visitors), so it is shown as n/a.</div>')
+    return (f'<div class="cmp"><div class="kicker">How you compare</div>{rank}'
+            f'<table><thead><tr><th>Area</th>{head}</tr></thead><tbody>{body}</tbody></table>{note}</div>')
+
+
 def build_html(report: dict, logo_src: str = None) -> str:
     score = int(report.get('overall_score') or 0)
     domain = report.get('domain') or report.get('url') or ''
@@ -636,6 +696,7 @@ def build_html(report: dict, logo_src: str = None) -> str:
         'switched on from day one.</p></div>')
 
     bench_html = f'<div class="callout">{_e(bench)}</div>' if bench else ''
+    cmp_html = _comparison_html(comparison_rows(report))
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -679,6 +740,7 @@ def build_html(report: dict, logo_src: str = None) -> str:
     <div class="box"><h3>What is already working</h3><ul>{strengths_html}</ul></div>
     <div class="box"><h3>Where the biggest upside is</h3><ul>{weakest_html}</ul></div>
   </div>
+  {cmp_html}
   {_footer(report_link, 2)}
 </section>
 

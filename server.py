@@ -13,6 +13,7 @@ from grader import CareerSiteGrader
 import db
 import emailer
 import client_report
+import competitors
 
 app = Flask(__name__, static_folder='public')
 db.init_db()
@@ -515,6 +516,8 @@ def api_grade():
         return jsonify({'error': f'mode must be one of: {", ".join(VALID_MODES)}'}), 400
 
     bypass = _bypass_requested()
+    raw_comp = (request.args.get('competitors') or '').strip()
+    comp_urls = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -526,6 +529,11 @@ def api_grade():
                 return {'error': ev.get('message', 'failed')}
             if ev.get('type') == 'complete':
                 final = ev
+        if final and comp_urls:
+            try:
+                final['comparison'] = await _build_comparison(comp_urls, mode, final)
+            except Exception:
+                pass
         return final
 
     try:
@@ -540,6 +548,73 @@ def api_grade():
     except Exception:
         pass
     resp = jsonify(result)
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
+# --- Competitors -------------------------------------------------------------
+
+_competitor_cache = {}
+
+
+@app.route('/api/competitors')
+def api_competitors():
+    """AI competitor finder: two direct competitors for a site (Claude + web search)."""
+    url = (request.args.get('url') or '').strip()
+    mode = (request.args.get('mode') or 'recruitment').strip()
+    if not url:
+        return jsonify({'error': 'url required'}), 400
+    if not url.lower().startswith(('http://', 'https://')):
+        url = 'https://' + url
+    if not competitors.enabled():
+        return jsonify({'error': 'AI competitor finder is not configured (ANTHROPIC_API_KEY). '
+                                 'Enter competitor websites manually.'}), 503
+    key = (competitors._host(url), mode)
+    with _client_pdf_lock:
+        cached = _competitor_cache.get(key)
+    if cached is not None:
+        return jsonify({'competitors': cached, 'cached': True})
+    if not _rate_ok('competitors', limit=15):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    try:
+        found = competitors.find_competitors(url, mode)
+    except Exception as e:
+        print(f'[competitors] finder failed for {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return jsonify({'error': 'Could not find competitors right now. Enter them manually.'}), 502
+    if found:
+        with _client_pdf_lock:
+            _bounded_put(_competitor_cache, key, found)
+    return jsonify({'competitors': found})
+
+
+@app.route('/api/compare', methods=['POST'])
+def api_compare():
+    """Attach a competitor comparison (up to 2) to an existing stored report."""
+    data = request.get_json(silent=True) or {}
+    report_id = (data.get('report_id') or '').strip()
+    report = db.get_report(report_id) if report_id else None
+    if not report:
+        return jsonify({'error': 'report not found'}), 404
+    urls = competitors.clean_urls(data.get('competitors') or [], report.get('domain', ''))
+    if not urls:
+        return jsonify({'error': 'Enter at least one competitor website.'}), 400
+    if not _rate_ok('compare', limit=20):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    mode = report.get('mode') or 'recruitment'
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        comparison = loop.run_until_complete(_build_comparison(urls, mode, report))
+    except Exception as e:
+        print(f'[compare] failed for {report_id}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return jsonify({'error': 'Could not analyse the competitors. Please try again.'}), 502
+    finally:
+        loop.close()
+    updated = {**report, 'comparison': comparison}
+    db.update_report(report_id, updated)
+    with _client_pdf_lock:
+        _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison page
+    resp = jsonify({'ok': True, 'comparison': comparison})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 

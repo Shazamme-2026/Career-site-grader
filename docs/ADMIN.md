@@ -59,6 +59,9 @@ railway variables --set "ADMIN_TOKEN=<random-secret>"
 | `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD` | Backlink authority (DataForSEO) |
 | `MOZ_TOKEN` | Backlink authority (Moz, alternative) |
 | `SENDGRID_API_KEY` | Report / monitor-digest emails |
+| `ANTHROPIC_API_KEY` | "Find with AI" competitor finder (Claude + web search). Without it the button returns 503 and manual entry still works |
+| `COMPETITOR_MODEL` | (optional) model for the finder, default `claude-opus-5-5` |
+| `CLIENT_PDF_RENDER_SLOTS` | (optional) concurrent Chromium renders per worker for the client PDF, default 2 |
 
 ## Client opportunity report (PDF)
 
@@ -76,3 +79,13 @@ report (reports are immutable) and the route is rate-limited at 20/hour/IP.
 Branding comes from `BRAND_SITE` / `BRAND_EMAIL` (defaults: shazamme.com,
 hello@shazamme.com). The check-name → plain-English copy lives in
 `client_report.CHECKS` and `client_report.ADVANTAGE`.
+
+## Competitor comparison
+
+Two competitors can be added before grading (hero) or after it (results screen),
+by hand or with **Find with AI** (`GET /api/competitors?url=&mode=` → two direct
+competitors with a one-line reason; cached per domain). After a grade,
+`POST /api/compare {report_id, competitors:[…]}` light-grades the competitors,
+attaches `comparison` to the stored report and clears that report's client-PDF
+cache. The table shows in the results, prints in the Full PDF, and appears as
+"How you compare" on page 2 of the client report.

@@ -618,6 +618,26 @@ body {
   border: 1px solid var(--border); color: var(--text1); font-size: 13px;
 }
 #competitor-input::placeholder { color: var(--text3); }
+.cmp-panel-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--text2); margin-bottom: 8px; }
+.cmp-panel-title .material-icons-round { font-size: 18px; color: var(--purple-l); }
+.cmp-opt { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-left: 2px; }
+.cmp-fields { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; }
+.cmp-input { width: 100%; padding: 11px 14px; border-radius: 10px; background: var(--surface, rgba(15,23,42,0.03)); border: 1px solid var(--border); color: var(--text); font-size: 13px; font-family: inherit; }
+.cmp-input::placeholder { color: var(--text3); }
+.cmp-input:focus { outline: none; border-color: var(--purple); box-shadow: 0 0 0 3px var(--glow); }
+.btn-ai { display: inline-flex; align-items: center; gap: 6px; padding: 0 16px; border-radius: 10px; border: 1px solid var(--purple); background: #fff; color: var(--purple-l); font-weight: 700; font-size: 13px; font-family: inherit; cursor: pointer; white-space: nowrap; transition: background .15s, transform .15s; }
+.btn-ai:hover { background: rgba(124,58,237,0.08); transform: translateY(-1px); }
+.btn-ai:disabled { opacity: .6; cursor: progress; transform: none; }
+.btn-ai .material-icons-round { font-size: 18px; }
+.btn-compare { background: linear-gradient(120deg, var(--purple) 0%, var(--pink) 115%); color: #fff; border: none; }
+.btn-compare:hover { background: linear-gradient(120deg, var(--purple-l) 0%, var(--pink-l) 115%); }
+.cmp-hint { font-size: 12px; color: var(--text3); margin-top: 8px; min-height: 16px; line-height: 1.5; }
+.cmp-hint.err { color: var(--rose); }
+.cmp-hint b { color: var(--text2); }
+.results-cmp { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px 20px; margin-bottom: 18px; }
+.results-cmp .cmp-fields { grid-template-columns: 1fr 1fr auto auto; }
+.cmp-table td.cmp-best { font-weight: 800; }
+@media (max-width: 640px) { .cmp-fields, .results-cmp .cmp-fields { grid-template-columns: 1fr; } }
 .fresh-toggle { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--text3); cursor: pointer; user-select: none; }
 .fresh-toggle input { cursor: pointer; }
 
@@ -961,7 +981,7 @@ hr.section-divider {
   body { background: #fff !important; color: #111 !important; font-size: 11px; }
   /* Hide only the interactive chrome — keep ALL report content */
   #hero, #loading, .results-header, .header-actions, .lead-capture,
-  .pillars-preview, .site-footer, #competitor-input, .competitor-wrap,
+  .pillars-preview, .site-footer, #competitor-input, .competitor-wrap, .results-cmp,
   .fresh-toggle, .rec-links { display: none !important; }
   #results { display: block !important; }
   .container { max-width: 100% !important; padding: 0 !important; }
@@ -1088,14 +1108,16 @@ hr.section-divider {
         Grade My Site — Free
       </button>
     </div>
-    <div class="competitor-wrap">
-      <input
-        type="text"
-        id="competitor-input"
-        placeholder="Optional: benchmark vs competitors — paste up to 3 URLs, comma-separated"
-        autocomplete="off" autocapitalize="off" spellcheck="false"
-        aria-label="Competitor URLs"
-      >
+    <div class="competitor-wrap cmp-panel" id="hero-cmp">
+      <div class="cmp-panel-title"><span class="material-icons-round">leaderboard</span> Compare against competitors <span class="cmp-opt">optional</span></div>
+      <div class="cmp-fields">
+        <input type="text" id="hero-comp-1" class="cmp-input" placeholder="Competitor 1 website" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Competitor 1 URL">
+        <input type="text" id="hero-comp-2" class="cmp-input" placeholder="Competitor 2 website" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Competitor 2 URL">
+        <button type="button" class="btn-ai" id="hero-find-btn" onclick="findCompetitors('hero')" title="Let AI find two direct competitors from the website above">
+          <span class="material-icons-round">auto_awesome</span> Find with AI
+        </button>
+      </div>
+      <div class="cmp-hint" id="hero-cmp-hint"></div>
     </div>
     <label class="fresh-toggle" id="fresh-toggle" title="Admin: ignore cached authority & Core Web Vitals and re-measure">
       <input type="checkbox" id="fresh-check"> Force fresh (bypass cache)
@@ -1433,7 +1455,7 @@ function startGrading(e) {
   $('recs-list').innerHTML = '';
   $('shazamme-grid').innerHTML = '';
 
-  const compRaw = ($('competitor-input') ? $('competitor-input').value.trim() : '');
+  const compRaw = competitorValues('hero').join(',');
   let gradeUrl = '/grade?url=' + encodeURIComponent(url) + '&mode=' + selectedMode;
   if (compRaw) gradeUrl += '&competitors=' + encodeURIComponent(compRaw);
 
@@ -1897,10 +1919,84 @@ function pollCwv(url, mode, tries, myId) {
     });
 }
 
+function competitorValues(scope) {
+  return [1, 2].map(i => ($(scope + '-comp-' + i) ? $(scope + '-comp-' + i).value.trim() : '')).filter(Boolean);
+}
+
+function setCompetitorHint(scope, msg, isErr) {
+  const h = $(scope + '-cmp-hint'); if (!h) return;
+  h.innerHTML = msg || ''; h.classList.toggle('err', !!isErr);
+}
+
+// Ask the server (Claude + web search) for two direct competitors and fill the fields.
+async function findCompetitors(scope) {
+  const targetUrl = scope === 'hero' ? $('url-input').value.trim() : (gradeData && gradeData.url);
+  if (!targetUrl) { setCompetitorHint(scope, 'Enter the website to grade first.', true); return; }
+  const mode = selectedMode || (gradeData && gradeData.mode) || 'recruitment';
+  const btn = $(scope + '-find-btn'); const label = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '<span class="material-icons-round">hourglass_top</span> Searching…';
+  setCompetitorHint(scope, 'Looking for direct competitors (same sectors, same region)…');
+  try {
+    const r = await fetch('/api/competitors?url=' + encodeURIComponent(targetUrl) + '&mode=' + encodeURIComponent(mode));
+    const data = await r.json();
+    if (!r.ok) { setCompetitorHint(scope, escHtml(data.error || 'Could not find competitors.'), true); return; }
+    const found = data.competitors || [];
+    if (!found.length) { setCompetitorHint(scope, 'No confident matches found. Enter competitor websites manually.', true); return; }
+    found.slice(0, 2).forEach((c, i) => { const el = $(scope + '-comp-' + (i + 1)); if (el) el.value = c.url; });
+    setCompetitorHint(scope, found.slice(0, 2).map(c =>
+      '<b>' + escHtml(c.name || c.url.replace(/^https?:\/\/(www\.)?/, '')) + '</b>' + (c.reason ? ' — ' + escHtml(c.reason) : '')).join('<br>'));
+  } catch (e) {
+    setCompetitorHint(scope, 'Could not reach the competitor finder. Enter them manually.', true);
+  } finally { btn.disabled = false; btn.innerHTML = label; }
+}
+
+// Results screen: grade the competitors against the stored report and attach the comparison.
+async function runCompare() {
+  if (!gradeData || !gradeData.report_id) return;
+  const urls = competitorValues('res');
+  if (!urls.length) { setCompetitorHint('res', 'Enter at least one competitor website.', true); return; }
+  const btn = $('res-compare-btn'); const label = btn.innerHTML;
+  btn.disabled = true; btn.innerHTML = '<span class="material-icons-round">hourglass_top</span> Analysing…';
+  setCompetitorHint('res', 'Grading ' + urls.length + ' competitor site' + (urls.length > 1 ? 's' : '') + ' — about a minute.');
+  try {
+    const r = await fetch('/api/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ report_id: gradeData.report_id, competitors: urls }) });
+    const data = await r.json();
+    if (!r.ok) { setCompetitorHint('res', escHtml(data.error || 'Comparison failed.'), true); return; }
+    gradeData.comparison = data.comparison;
+    renderComparison(gradeData.comparison, gradeData.pillars);
+    setCompetitorHint('res', 'Done. The table below is included in the Full PDF and the Client report.');
+  } catch (e) {
+    setCompetitorHint('res', 'Could not reach the server. Please try again.', true);
+  } finally { btn.disabled = false; btn.innerHTML = label; }
+}
+
+function competitorPanelHtml(comp) {
+  const existing = (comp && comp.competitors) ? comp.competitors.map(c => c.url || '') : [];
+  const v = i => escHtml(existing[i] || '');
+  return `
+    <div class="results-cmp cmp-panel">
+      <div class="cmp-panel-title"><span class="material-icons-round">leaderboard</span> Compare against competitors</div>
+      <div class="cmp-fields">
+        <input type="text" id="res-comp-1" class="cmp-input" placeholder="Competitor 1 website" value="${v(0)}" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Competitor 1 URL">
+        <input type="text" id="res-comp-2" class="cmp-input" placeholder="Competitor 2 website" value="${v(1)}" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Competitor 2 URL">
+        <button type="button" class="btn-ai" id="res-find-btn" onclick="findCompetitors('res')" title="Let AI find two direct competitors"><span class="material-icons-round">auto_awesome</span> Find with AI</button>
+        <button type="button" class="btn-ai btn-compare" id="res-compare-btn" onclick="runCompare()"><span class="material-icons-round">compare_arrows</span> Compare</button>
+      </div>
+      <div class="cmp-hint" id="res-cmp-hint"></div>
+    </div>`;
+}
+
 function renderComparison(comp, pillars) {
   const box = $('comparison-section');
-  if (!comp || !comp.competitors || !comp.competitors.length) { box.style.display = 'none'; return; }
   box.style.display = '';
+  const panel = (gradeData && gradeData.report_id) ? competitorPanelHtml(comp) : '';
+  if (!comp || !comp.competitors || !comp.competitors.length) {
+    if (!panel) { box.style.display = 'none'; return; }
+    box.innerHTML = `<hr class="section-divider">
+      <div class="section-title"><span class="material-icons-round">leaderboard</span> Competitor Benchmark</div>${panel}`;
+    return;
+  }
   const t = comp.target;
   const rows = [t, ...comp.competitors];
   const pillarKeys = Object.keys(pillars || {});
@@ -1909,27 +2005,32 @@ function renderComparison(comp, pillars) {
   const hasAuthority = rows.some(r => r.authority && r.authority.referring_domains != null);
   const head = `<th>Site</th><th>Overall</th>` + pillarNames.map(n => `<th>${escHtml(n.split(' ')[0])}</th>`).join('')
     + (hasAuthority ? `<th>Ref. domains</th>` : '');
+  const bestOverall = Math.max(...rows.filter(r => !r.error).map(r => r.overall_score));
+  const bestPillar = {};
+  pillarKeys.forEach(k => { bestPillar[k] = Math.max(...rows.filter(r => !r.error && r.pillars && r.pillars[k] != null).map(r => r.pillars[k])); });
   const bodyRows = rows.map((r, idx) => {
     const isTarget = idx === 0;
     const span = pillarKeys.length + 1 + (hasAuthority ? 1 : 0);
     if (r.error) return `<tr class="${isTarget?'cmp-target':''}"><td>${escHtml(r.domain || r.url)}</td><td colspan="${span}" class="cmp-err">Could not analyse: ${escHtml(r.error)}</td></tr>`;
     const cells = pillarKeys.map(k => {
       const v = r.pillars ? r.pillars[k] : null;
-      return `<td style="color:${v==null?'#64748b':gradeColor(v)}">${v==null?'—':v}</td>`;
+      const best = v != null && v === bestPillar[k] ? ' cmp-best' : '';
+      return `<td class="${best.trim()}" style="color:${v==null?'#64748b':gradeColor(v)}">${v==null?'—':v}</td>`;
     }).join('');
     const authCell = hasAuthority
       ? `<td>${r.authority && r.authority.referring_domains != null ? r.authority.referring_domains.toLocaleString() : '—'}</td>`
       : '';
     return `<tr class="${isTarget?'cmp-target':''}">
       <td>${isTarget?'<strong>'+escHtml(r.domain)+' (you)</strong>':escHtml(r.domain||r.url)}</td>
-      <td><strong style="color:${gradeColor(r.overall_score)}">${r.overall_score}</strong> ${escHtml(r.grade||'')}</td>
+      <td class="${r.overall_score === bestOverall ? 'cmp-best' : ''}"><strong style="color:${gradeColor(r.overall_score)}">${r.overall_score}</strong> ${escHtml(r.grade||'')}</td>
       ${cells}${authCell}</tr>`;
   }).join('');
   const rankNote = comp.rank && comp.field_size
-    ? `<div class="cmp-rank">You rank <strong>#${comp.rank}</strong> of ${comp.field_size} on overall score.</div>` : '';
+    ? `<div class="cmp-rank">You rank <strong>#${comp.rank}</strong> of ${comp.field_size} on overall score. Bold marks the leader in each column.</div>` : '';
   box.innerHTML = `
     <hr class="section-divider">
     <div class="section-title"><span class="material-icons-round">leaderboard</span> Competitor Benchmark</div>
+    ${panel}
     ${rankNote}
     <div class="cmp-table-wrap"><table class="cmp-table"><thead><tr>${head}</tr></thead><tbody>${bodyRows}</tbody></table></div>`;
 }

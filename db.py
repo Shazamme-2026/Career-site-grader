@@ -285,6 +285,19 @@ def save_report(report_id: str, url: str, mode: str, report: Dict) -> bool:
         return False
 
 
+def update_report(report_id: str, report: Dict) -> bool:
+    """Replace a stored report (used to attach a competitor comparison after grading)."""
+    if not _ENABLED:
+        return False
+    try:
+        with _LOCK, _connect() as conn:
+            cur = conn.execute('UPDATE reports SET report_json=? WHERE id=?',
+                               (json.dumps(report), report_id))
+        return cur.rowcount > 0
+    except Exception:
+        return False
+
+
 def get_report(report_id: str) -> Optional[Dict]:
     if not _ENABLED:
         return None
