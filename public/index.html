@@ -1153,8 +1153,11 @@ hr.section-divider {
         <button class="btn-ghost" id="btn-logo" onclick="downloadLogo()" style="display:none">
           <span class="material-icons-round">image</span> Logo
         </button>
-        <button class="btn-ghost" onclick="downloadPDF()">
-          <span class="material-icons-round">picture_as_pdf</span> PDF
+        <button class="btn-ghost" id="btn-client-pdf" onclick="downloadClientPDF()" style="display:none" title="A short, plain-English opportunity report to send to the client">
+          <span class="material-icons-round">auto_awesome</span> Client report
+        </button>
+        <button class="btn-ghost" onclick="downloadPDF()" title="Print the full technical report">
+          <span class="material-icons-round">picture_as_pdf</span> Full PDF
         </button>
         <button class="btn-ghost" onclick="copyLink()">
           <span class="material-icons-round">share</span> Share
@@ -1533,6 +1536,8 @@ function renderResults(data) {
 
   // Client logo (auto-detected from the graded site) + download
   renderClientLogo(data.client_logo);
+  const cbtn = $('btn-client-pdf');
+  if (cbtn) cbtn.style.display = data.report_id ? '' : 'none';
 
   // Platform / tech-stack closing block
   renderTechStack(data.tech_stack_summary);
@@ -1671,6 +1676,38 @@ async function submitLead(e) {
 
 function downloadPDF() {
   window.print();
+}
+
+// Client-facing opportunity report: a 4-page, plain-English PDF rendered server-side.
+// Falls back to the print-ready page (browser "Save as PDF") if Chromium is unavailable.
+let _clientPdfBusy = false;
+async function downloadClientPDF() {
+  const id = gradeData && gradeData.report_id;
+  if (!id || _clientPdfBusy) return;
+  const btn = $('btn-client-pdf');
+  const label = btn.innerHTML;
+  _clientPdfBusy = true;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="material-icons-round">hourglass_top</span> Preparing…';
+  try {
+    const r = await fetch('/r/' + encodeURIComponent(id) + '/client.pdf');
+    if (!r.ok) {
+      window.open('/r/' + encodeURIComponent(id) + '/client?print=1', '_blank', 'noopener');
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = ((gradeData.domain || 'website').replace(/[^a-z0-9.-]+/gi, '-')) + '-opportunity-report.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (e) {
+    window.open('/r/' + encodeURIComponent(id) + '/client?print=1', '_blank', 'noopener');
+  } finally {
+    _clientPdfBusy = false;
+    btn.disabled = false;
+    btn.innerHTML = label;
+  }
 }
 
 let _clientLogoUrl = null;

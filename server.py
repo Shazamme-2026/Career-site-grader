@@ -6,11 +6,13 @@ import threading
 import re
 import time
 import secrets
+import sys
 from collections import defaultdict, deque
 from flask import Flask, request, Response, send_from_directory, jsonify
 from grader import CareerSiteGrader
 import db
 import emailer
+import client_report
 
 app = Flask(__name__, static_folder='public')
 db.init_db()
@@ -231,26 +233,21 @@ def health():
     return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader'})
 
 
-@app.route('/api/logo')
-def api_logo():
-    """SSRF-guarded image proxy so a client's logo always loads and downloads in
-    the report, regardless of hotlink protection or CORS on the origin."""
+def _fetch_image(src: str, max_bytes: int = 3 * 1024 * 1024):
+    """SSRF-guarded image fetch. Returns (content_type, bytes) or None."""
     import urllib.request, ipaddress, socket
     from urllib.parse import urlparse as _up
-    src = (request.args.get('url') or '').strip()
-    if not src:
-        return ('', 400)
-    p = _up(src)
+    p = _up(src or '')
     if p.scheme not in ('http', 'https') or not p.hostname:
-        return ('', 400)
+        return None
     try:
         for info in socket.getaddrinfo(p.hostname, None):
             ip = ipaddress.ip_address(info[4][0])
             if (ip.is_private or ip.is_loopback or ip.is_link_local
                     or ip.is_reserved or ip.is_multicast):
-                return ('', 400)
+                return None
     except Exception:
-        return ('', 400)
+        return None
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):
@@ -261,16 +258,94 @@ def api_logo():
         with opener.open(req, timeout=8) as r:
             ctype = (r.headers.get('content-type') or '').split(';')[0].strip()
             if not ctype.startswith('image/'):
-                return ('', 415)
-            data = r.read(3 * 1024 * 1024 + 1)
-        if len(data) > 3 * 1024 * 1024:
-            return ('', 413)
-        resp = Response(data, mimetype=ctype)
-        resp.headers['Cache-Control'] = 'public, max-age=86400'
-        resp.headers['Access-Control-Allow-Origin'] = '*'
-        return resp
+                return None
+            data = r.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        return ctype, data
     except Exception:
+        return None
+
+
+@app.route('/api/logo')
+def api_logo():
+    """Image proxy so a client's logo always loads and downloads in the report,
+    regardless of hotlink protection or CORS on the origin."""
+    src = (request.args.get('url') or '').strip()
+    if not src:
+        return ('', 400)
+    fetched = _fetch_image(src)
+    if not fetched:
         return ('', 502)
+    ctype, data = fetched
+    resp = Response(data, mimetype=ctype)
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
+def _logo_data_uri(report):
+    """Client logo as a data URI so the PDF never depends on a third-party host."""
+    import base64
+    src = (report or {}).get('client_logo')
+    if not src:
+        return None
+    fetched = _fetch_image(src)
+    if not fetched:
+        return None
+    ctype, data = fetched
+    return f'data:{ctype};base64,' + base64.b64encode(data).decode('ascii')
+
+
+_client_pdf_cache = {}
+_client_pdf_lock = threading.Lock()
+
+
+def _client_pdf_filename(report):
+    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
+    return f'{domain}-opportunity-report.pdf'
+
+
+@app.route('/r/<report_id>/client')
+def client_report_html(report_id):
+    """Client-facing opportunity report as a print-ready page (fallback when
+    server-side PDF rendering is unavailable: the browser's Save as PDF)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    html = client_report.build_html(report, logo_src=_logo_data_uri(report))
+    if request.args.get('print') == '1':
+        html = html.replace('</body>', '<script>window.onload=function(){window.print()}</script></body>')
+    return Response(html, mimetype='text/html')
+
+
+@app.route('/r/<report_id>/client.pdf')
+def client_report_pdf(report_id):
+    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    with _client_pdf_lock:
+        pdf = _client_pdf_cache.get(report_id)
+    if pdf is None:
+        if not _rate_ok('client_pdf', limit=20):
+            return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+        html = client_report.build_html(report, logo_src=_logo_data_uri(report))
+        try:
+            pdf = client_report.render_pdf(html)
+        except Exception as e:
+            print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
+                  file=sys.stderr, flush=True)
+            return jsonify({'error': 'pdf unavailable',
+                            'fallback': f'/r/{report_id}/client?print=1'}), 503
+        with _client_pdf_lock:
+            if len(_client_pdf_cache) >= 50:
+                _client_pdf_cache.pop(next(iter(_client_pdf_cache)))
+            _client_pdf_cache[report_id] = pdf
+    resp = Response(pdf, mimetype='application/pdf')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{_client_pdf_filename(report)}"'
+    resp.headers['Cache-Control'] = 'private, max-age=86400'
+    return resp
 
 
 @app.route('/methodology')

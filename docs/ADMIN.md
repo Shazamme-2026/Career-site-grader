@@ -59,3 +59,20 @@ railway variables --set "ADMIN_TOKEN=<random-secret>"
 | `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD` | Backlink authority (DataForSEO) |
 | `MOZ_TOKEN` | Backlink authority (Moz, alternative) |
 | `SENDGRID_API_KEY` | Report / monitor-digest emails |
+
+## Client opportunity report (PDF)
+
+Every stored report has a short, plain-English, client-facing version built
+from the same grade (`client_report.py`):
+
+```
+/r/<report_id>/client        print-ready HTML (add ?print=1 to auto-open the print dialog)
+/r/<report_id>/client.pdf    A4 PDF rendered with Chromium, served as a download
+```
+
+The "Client report" button in the results header calls the PDF route and falls
+back to the HTML view if Chromium is unavailable. PDFs are cached in memory per
+report (reports are immutable) and the route is rate-limited at 20/hour/IP.
+Branding comes from `BRAND_SITE` / `BRAND_EMAIL` (defaults: shazamme.com,
+hello@shazamme.com). The check-name → plain-English copy lives in
+`client_report.CHECKS` and `client_report.ADVANTAGE`.
