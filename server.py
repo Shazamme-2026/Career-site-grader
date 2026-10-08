@@ -252,7 +252,14 @@ def grade():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader'})
+    # Feature flags and the NAMES (never values) of Anthropic-related env vars,
+    # so a mis-named or mis-placed key can be diagnosed from outside.
+    anthropic_vars = sorted(k for k in os.environ if 'anthropic' in k.lower())
+    return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader',
+                    'ai_finder': competitors.enabled(),
+                    'anthropic_env_names': anthropic_vars,
+                    'pagespeed': bool(os.environ.get('PAGESPEED_API_KEY')),
+                    'email': emailer.enabled()})
 
 
 def _fetch_image(src: str, max_bytes: int = 3 * 1024 * 1024):
