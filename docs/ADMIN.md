@@ -80,6 +80,22 @@ Branding comes from `BRAND_SITE` / `BRAND_EMAIL` (defaults: shazamme.com,
 hello@shazamme.com). The check-name → plain-English copy lives in
 `client_report.CHECKS` and `client_report.ADVANTAGE`.
 
+## Full technical report (PDF)
+
+The **Full PDF** button downloads a server-rendered A4 version of the complete
+on-screen report (`full_report.py`): executive summary, pillar scores,
+competitor benchmark, Core Web Vitals, every check in every pillar,
+recommendations, Shazamme advantage, coverage. Same Chromium renderer, cache,
+semaphore and rate limit as the client report.
+
+```
+/r/<report_id>/full          print-ready HTML (add ?print=1 for the print dialog)
+/r/<report_id>/full.pdf      A4 PDF download
+```
+
+The browser print dialog remains the fallback when there is no stored report
+or Chromium is unavailable.
+
 ## Competitor comparison
 
 Two competitors can be added before grading (hero) or after it (results screen),

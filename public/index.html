@@ -1178,7 +1178,7 @@ hr.section-divider {
         <button class="btn-ghost" id="btn-client-pdf" onclick="downloadClientPDF()" style="display:none" title="A short, plain-English opportunity report to send to the client">
           <span class="material-icons-round">auto_awesome</span> Client report
         </button>
-        <button class="btn-ghost" onclick="downloadPDF()" title="Print the full technical report">
+        <button class="btn-ghost" id="btn-full-pdf" onclick="downloadPDF()" title="Download the full technical report as a PDF">
           <span class="material-icons-round">picture_as_pdf</span> Full PDF
         </button>
         <button class="btn-ghost" onclick="copyLink()">
@@ -1697,8 +1697,32 @@ async function submitLead(e) {
   }
 }
 
-function downloadPDF() {
-  window.print();
+// Full technical report: server-rendered PDF (same renderer as the client report).
+// Falls back to the browser print dialog when there is no stored report or Chromium is unavailable.
+let _fullPdfBusy = false;
+async function downloadPDF() {
+  const id = gradeData && gradeData.report_id;
+  if (!id) { window.print(); return; }
+  if (_fullPdfBusy) return;
+  const btn = $('btn-full-pdf');
+  const label = btn ? btn.innerHTML : '';
+  _fullPdfBusy = true;
+  if (btn) { btn.disabled = true; btn.innerHTML = '<span class="material-icons-round">hourglass_top</span> Preparing…'; }
+  try {
+    const r = await fetch('/r/' + encodeURIComponent(id) + '/full.pdf');
+    if (!r.ok) { window.print(); return; }
+    const blob = await r.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = ((gradeData.domain || 'website').replace(/[^a-z0-9.-]+/gi, '-')) + '-grade-report.pdf';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (e) {
+    window.print();
+  } finally {
+    _fullPdfBusy = false;
+    if (btn) { btn.disabled = false; btn.innerHTML = label; }
+  }
 }
 
 // Client-facing opportunity report: a 4-page, plain-English PDF rendered server-side.

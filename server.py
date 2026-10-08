@@ -13,6 +13,7 @@ from grader import CareerSiteGrader
 import db
 import emailer
 import client_report
+import full_report
 import competitors
 
 app = Flask(__name__, static_folder='public')
@@ -348,11 +349,6 @@ def _per_report_lock(report_id):
         return lock
 
 
-def _client_pdf_filename(report):
-    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
-    return f'{domain}-opportunity-report.pdf'
-
-
 @app.route('/r/<report_id>/client')
 def client_report_html(report_id):
     """Client-facing opportunity report as a print-ready page (fallback when
@@ -368,41 +364,83 @@ def client_report_html(report_id):
     return Response(html, mimetype='text/html')
 
 
-@app.route('/r/<report_id>/client.pdf')
-def client_report_pdf(report_id):
-    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+_PDF_KINDS = {
+    'client': (client_report.build_html, client_report.render_pdf, '-opportunity-report.pdf'),
+    'full': (full_report.build_html, full_report.render_pdf, '-grade-report.pdf'),
+}
+
+
+def _serve_pdf(report_id, kind):
     report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'not found'}), 404
+    build, render, suffix = _PDF_KINDS[kind]
+    key = (report_id, kind)
+    fallback = f'/r/{report_id}/{kind}?print=1'
     with _client_pdf_lock:
-        pdf = _client_pdf_cache.get(report_id)
+        pdf = _client_pdf_cache.get(key)
     if pdf is None:
-        if not _rate_ok('client_pdf', limit=20):
+        if not _rate_ok('client_pdf', limit=30):
             return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
         # Same report: one render, the rest wait and reuse it (no stampede).
-        with _per_report_lock(report_id):
+        with _per_report_lock(key):
             with _client_pdf_lock:
-                pdf = _client_pdf_cache.get(report_id)
+                pdf = _client_pdf_cache.get(key)
             if pdf is None:
-                html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+                try:
+                    html = build(report, logo_src=_logo_data_uri(report_id, report))
+                except Exception as e:
+                    print(f'[{kind}_report] build failed for {report_id}: {type(e).__name__}: {e}',
+                          file=sys.stderr, flush=True)
+                    return jsonify({'error': 'pdf unavailable', 'fallback': fallback}), 503
                 # Cap concurrent Chromium processes across the worker.
                 if not _render_sem.acquire(timeout=5):
-                    return jsonify({'error': 'busy', 'fallback': f'/r/{report_id}/client?print=1'}), 503
+                    return jsonify({'error': 'busy', 'fallback': fallback}), 503
                 try:
-                    pdf = client_report.render_pdf(html)
+                    pdf = render(html)
                 except Exception as e:
-                    print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
+                    print(f'[{kind}_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
                           file=sys.stderr, flush=True)
-                    return jsonify({'error': 'pdf unavailable',
-                                    'fallback': f'/r/{report_id}/client?print=1'}), 503
+                    return jsonify({'error': 'pdf unavailable', 'fallback': fallback}), 503
                 finally:
                     _render_sem.release()
                 with _client_pdf_lock:
-                    _bounded_put(_client_pdf_cache, report_id, pdf)
+                    _bounded_put(_client_pdf_cache, key, pdf, cap=100)
     resp = Response(pdf, mimetype='application/pdf')
-    resp.headers['Content-Disposition'] = f'attachment; filename="{_client_pdf_filename(report)}"'
+    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
+    resp.headers['Content-Disposition'] = f'attachment; filename="{domain}{suffix}"'
     resp.headers['Cache-Control'] = 'private, max-age=86400'
     return resp
+
+
+@app.route('/r/<report_id>/client.pdf')
+def client_report_pdf(report_id):
+    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+    return _serve_pdf(report_id, 'client')
+
+
+@app.route('/r/<report_id>/full')
+def full_report_html(report_id):
+    """Technical report as a print-ready page (fallback when Chromium is unavailable)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    if not _rate_ok('client_html', limit=60):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    try:
+        html = full_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+    except Exception as e:
+        print(f'[full_report] build failed for {report_id}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return jsonify({'error': 'report unavailable'}), 500
+    if request.args.get('print') == '1':
+        html = html.replace('</body>', '<script>window.onload=function(){window.print()}</script></body>')
+    return Response(html, mimetype='text/html')
+
+
+@app.route('/r/<report_id>/full.pdf')
+def full_report_pdf(report_id):
+    """Full technical report as a downloadable A4 PDF (Chromium)."""
+    return _serve_pdf(report_id, 'full')
 
 
 @app.route('/methodology')
@@ -646,7 +684,8 @@ def api_compare():
             loop.close()
         db.set_report_comparison(report_id, comparison)
         with _client_pdf_lock:
-            _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison table
+            for kind in _PDF_KINDS:  # both PDFs now carry a comparison table
+                _client_pdf_cache.pop((report_id, kind), None)
     resp = jsonify({'ok': True, 'comparison': comparison})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
