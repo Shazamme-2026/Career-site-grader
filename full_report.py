@@ -18,6 +18,18 @@ def _e(v) -> str:
     return _html.escape(str(v if v is not None else ''), quote=True)
 
 
+def _num(v, default=0):
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return default
+
+
+def _clip(v, n=300) -> str:
+    v = str(v if v is not None else '')
+    return v if len(v) <= n else v[:n - 1] + '…'
+
+
 def _colour(score) -> str:
     try:
         s = float(score)
@@ -134,7 +146,7 @@ def _items_html(items):
 
 
 def _hero(report, logo_src):
-    score = int(report.get('overall_score') or 0)
+    score = _num(report.get('overall_score'))
     c = _colour(score)
     bench = report.get('benchmark') or {}
     auth = report.get('authority') or {}
@@ -142,16 +154,16 @@ def _hero(report, logo_src):
     plat = (report.get('platform') or {}).get('platform')
     pills = []
     if bench.get('ready'):
-        pills.append(f'Beats <b>{int(bench.get("beats_pct") or 0)}%</b> of {int(bench.get("sample") or 0):,} graded sites')
-        pills.append(f'Category average {int(bench.get("average") or 0)}')
+        pills.append(f'Beats <b>{_num(bench.get("beats_pct"))}%</b> of {_num(bench.get("sample")):,} graded sites')
+        pills.append(f'Category average {_num(bench.get("average"))}')
     if auth.get('rank') is not None or auth.get('referring_domains') is not None:
         parts = []
-        if auth.get('rank') is not None: parts.append(f'rank {int(auth["rank"])}')
-        if auth.get('referring_domains') is not None: parts.append(f'{int(auth["referring_domains"]):,} referring domains')
-        if auth.get('backlinks') is not None: parts.append(f'{int(auth["backlinks"]):,} backlinks')
+        if auth.get('rank') is not None: parts.append(f'rank {_num(auth["rank"])}')
+        if auth.get('referring_domains') is not None: parts.append(f'{_num(auth["referring_domains"]):,} referring domains')
+        if auth.get('backlinks') is not None: parts.append(f'{_num(auth["backlinks"]):,} backlinks')
         pills.append('Authority: ' + ' · '.join(parts))
     if len(hist) >= 2:
-        delta = int(hist[-1].get('overall', 0)) - int(hist[0].get('overall', 0))
+        delta = _num((hist[-1] or {}).get('overall')) - _num((hist[0] or {}).get('overall'))
         pills.append(f'{"▲ +" if delta > 0 else "▼ " if delta < 0 else "–"}{delta if delta else ""} over {len(hist)} scans'.replace('– over', 'No change over'))
     if plat:
         pills.append(f'Platform: {_e(plat)}')
@@ -193,7 +205,7 @@ def _exec(report):
 def _pillar_table(report):
     rows = ''
     for p in (report.get('pillars') or {}).values():
-        s = int(p.get('score') or 0); c = _colour(s)
+        s = _num(p.get('score')); c = _colour(s)
         rows += (f'<tr><td><b>{_e(p.get("name"))}</b><div class="muted">{_e(p.get("summary"))}</div></td>'
                  f'<td><div class="bar"><i style="width:{s}%;background:{_safe_colour(p.get("color"))}"></i></div></td>'
                  f'<td class="num" style="color:{c}"><b>{s}</b> {_e(p.get("grade"))}</td>'
@@ -211,8 +223,8 @@ def _comparison(report):
     keys = list((report.get('pillars') or {}).keys())
     names = {k: (report['pillars'][k].get('name') or k).split(' ')[0] for k in keys}
     rows_src = [target] + comps
-    best = {k: max([(r.get('pillars') or {}).get(k) or 0 for r in rows_src if not r.get('error')] or [0]) for k in keys}
-    best_overall = max([r.get('overall_score') or 0 for r in rows_src if not r.get('error')] or [0])
+    best = {k: max([_num((r.get('pillars') or {}).get(k)) for r in rows_src if not r.get('error')] or [0]) for k in keys}
+    best_overall = max([_num(r.get('overall_score')) for r in rows_src if not r.get('error')] or [0])
     head = ''.join(f'<th class="num">{_e(names[k])}</th>' for k in keys)
     body = ''
     for i, r in enumerate(rows_src):
@@ -221,42 +233,52 @@ def _comparison(report):
         if r.get('error'):
             body += f'<tr{you}><td>{name}</td><td colspan="{len(keys) + 1}" class="muted"><i>Could not analyse: {_e(r["error"])}</i></td></tr>'
             continue
-        ov = r.get('overall_score')
-        cells = ''.join(
-            f'<td class="num{" best" if (r.get("pillars") or {}).get(k) == best[k] and best[k] else ""}" style="color:{_colour((r.get("pillars") or {}).get(k))}">'
-            f'{(r.get("pillars") or {}).get(k, "—")}</td>' for k in keys)
+        ov = _num(r.get('overall_score'))
+        cells = ''
+        for k in keys:
+            raw = (r.get('pillars') or {}).get(k)
+            v = _num(raw) if raw is not None else None
+            cls = ' best' if v is not None and v == best[k] and best[k] else ''
+            cells += f'<td class="num{cls}" style="color:{_colour(v)}">{v if v is not None else "—"}</td>'
         body += (f'<tr{you}><td>{name}</td><td class="num{" best" if ov == best_overall and ov else ""}" style="color:{_colour(ov)}">'
                  f'<b>{ov}</b> {_e(r.get("grade"))}</td>{cells}</tr>')
-    rank = (f'<p class="muted" style="margin-bottom:6px">You rank <b>#{int(comp["rank"])}</b> of {int(comp["field_size"])} on overall score. Bold marks the leader in each column.</p>'
+    rank = (f'<p class="muted" style="margin-bottom:6px">You rank <b>#{_num(comp["rank"])}</b> of {_num(comp["field_size"])} on overall score. Bold marks the leader in each column.</p>'
             if comp.get('rank') and comp.get('field_size') else '')
     return (f'<div class="section"><h2>Competitor Benchmark</h2>{rank}<table><thead><tr><th>Site</th><th class="num">Overall</th>{head}</tr></thead>'
             f'<tbody>{body}</tbody></table></div>')
 
 
 def _cwv_device(d, title):
-    perf = d.get('perf_score')
+    perf = _num(d.get('perf_score'), None) if d.get('perf_score') is not None else None
     field, lab = d.get('field') or {}, d.get('lab') or {}
     metrics = ''
     if d.get('has_field'):
         for key, label, fmt in (('lcp', 'LCP', lambda v: f'{v / 1000:.1f}s'), ('inp', 'INP', lambda v: f'{int(v)}ms'),
                                 ('cls', 'CLS', lambda v: f'{v:.2f}'), ('fcp', 'FCP', lambda v: f'{v / 1000:.1f}s')):
             m = field.get(key) or {}
-            v = m.get('p75'); r = _RATING.get(m.get('rating'), ('—', '#64748b'))
-            metrics += (f'<div class="metric"><div class="k">{label} (field)</div><div class="v">{fmt(v) if v is not None else "—"}</div>'
+            v = m.get('p75'); r = _RATING.get(str(m.get('rating')), ('—', '#64748b'))
+            try:
+                shown = fmt(float(v)) if v is not None else '—'
+            except (TypeError, ValueError):
+                shown = '—'
+            metrics += (f'<div class="metric"><div class="k">{label} (field)</div><div class="v">{shown}</div>'
                         f'<div class="r" style="color:{r[1]}">{r[0]}</div></div>')
     for key, label, fmt in (('lcp_ms', 'LCP', lambda v: f'{v / 1000:.1f}s'), ('fcp_ms', 'FCP', lambda v: f'{v / 1000:.1f}s'),
                             ('cls', 'CLS', lambda v: f'{v:.3f}'), ('tbt_ms', 'TBT', lambda v: f'{int(v)}ms'),
                             ('si_ms', 'Speed Index', lambda v: f'{v / 1000:.1f}s'), ('ttfb_ms', 'TTFB', lambda v: f'{int(v)}ms')):
         v = lab.get(key)
-        if v is not None:
-            metrics += f'<div class="metric"><div class="k">{label} (lab)</div><div class="v">{fmt(float(v))}</div></div>'
+        try:
+            if v is not None:
+                metrics += f'<div class="metric"><div class="k">{label} (lab)</div><div class="v">{fmt(float(v))}</div></div>'
+        except (TypeError, ValueError):
+            pass
     issues = ''
     for i in (d.get('issues') or [])[:MAX_ITEMS]:
         display = f' <span class="muted">{_e(i.get("display"))}</span>' if i.get('display') else ''
         issues += f'<li>{_e(i.get("title"))}{display}</li>'
     issues_html = f'<div style="margin-top:8px"><b>Improvements to raise this score</b><ul style="padding-left:14px;color:#475569">{issues}</ul></div>' if issues else ''
     pc = _colour(perf) if perf is not None else '#64748b'
-    runs = f' · {int(d["runs"])} runs' if d.get('runs') else ''
+    runs = f' · {_num(d["runs"])} runs' if d.get('runs') else ''
     return (f'<div class="card"><h3 style="margin-bottom:6px">{title}</h3><div class="cwv">'
             f'<div class="score" style="color:{pc}">{perf if perf is not None else "—"}<small>Lighthouse performance{runs}</small></div>'
             f'<div class="metrics">{metrics}</div></div>{issues_html}</div>')
@@ -276,16 +298,16 @@ def _cwv(report):
 def _findings(report):
     out = ''
     for p in (report.get('pillars') or {}).values():
-        s = int(p.get('score') or 0); c = _colour(s)
+        s = _num(p.get('score')); c = _colour(s)
         checks = ''
         for ch in p.get('checks') or []:
-            ic, col, _ = _STATUS.get(ch.get('status'), ('•', '#64748b', ''))
-            val = f'<div class="val">{_e(ch.get("value"))}</div>' if ch.get('value') not in (None, '', 'None') else ''
+            ic, col, _ = _STATUS.get(str(ch.get('status')), ('•', '#64748b', ''))
+            val = f'<div class="val">{_e(_clip(ch.get("value")))}</div>' if ch.get('value') not in (None, '', 'None') else ''
             help_ = f'<div class="help">{_e(ch.get("help"))}</div>' if ch.get('help') else ''
             checks += (f'<div class="check"><div class="ic" style="background:{col}">{ic}</div><div>'
-                       f'<div class="nm">{_e(ch.get("name"))}</div><div class="dt">{_e(ch.get("detail"))}</div>{val}'
+                       f'<div class="nm">{_e(ch.get("name"))}</div><div class="dt">{_e(_clip(ch.get("detail"), 600))}</div>{val}'
                        f'{_items_html(ch.get("items"))}{help_}</div>'
-                       f'<div class="sc">{ch.get("score", "")}/{ch.get("max", "")}</div></div>')
+                       f'<div class="sc">{_e(ch.get("score", ""))}/{_e(ch.get("max", ""))}</div></div>')
         out += (f'<div class="pillar"><div class="pillar-head"><div><h3>{_e(p.get("name"))}</h3>'
                 f'<div class="muted">{_e(p.get("summary"))} · {len(p.get("checks") or [])} checks</div></div>'
                 f'<div><span class="s" style="color:{c}">{s}</span><span class="g" style="color:{c}">{_e(p.get("grade"))}</span></div></div>'
@@ -300,14 +322,14 @@ def _recs(report):
     rows = ''
     for r in recs:
         pc = _PRIORITY.get(r.get('priority'), '#64748b'); plc = _safe_colour(r.get('pillar_color'))
-        score = f' <span class="muted">{r["score"]}/{r["max"]}</span>' if r.get('score') is not None and r.get('max') else ''
+        score = f' <span class="muted">{_e(r["score"])}/{_e(r["max"])}</span>' if r.get('score') is not None and r.get('max') else ''
         links = ' · '.join(f'{_e(l.get("label"))}: {_e(l.get("url"))}' for l in (r.get('links') or []) if isinstance(l, dict))
-        evidence = f'<div class="ev">Detected: {_e(r["value"])}</div>' if r.get('value') else ''
+        evidence = f'<div class="ev">Detected: {_e(_clip(r["value"]))}</div>' if r.get('value') else ''
         fix = f'<div class="fx"><b>How to fix:</b> {_e(r["how_to_fix"])}</div>' if r.get('how_to_fix') else ''
         links_html = f'<div class="ln">{links}</div>' if links else ''
         rows += (f'<div class="rec"><div class="pr" style="background:{pc}">{_e(r.get("priority"))}</div><div>'
                  f'<div class="ck">{_e(r.get("check"))}{score}<span class="pl" style="background:{plc}1a;color:{plc}">{_e(r.get("pillar"))}</span></div>'
-                 f'<div class="dt">{_e(r.get("detail"))}</div>{evidence}{_items_html(r.get("items"))}'
+                 f'<div class="dt">{_e(_clip(r.get("detail"), 600))}</div>{evidence}{_items_html(r.get("items"))}'
                  f'<div class="im"><b>Why it matters:</b> {_e(r.get("impact"))}</div>{fix}{links_html}</div></div>')
     return f'<div class="section flow"><h2>Priority Recommendations</h2>{rows}</div>'
 
@@ -326,13 +348,16 @@ def _coverage(report, link):
     ts = report.get('tech_stack_summary') or {}
     pages = report.get('pages_scanned') or []
     facts = []
-    if cov.get('content_pages') is not None: facts.append(f'{int(cov["content_pages"])} content pages analysed' + (f' of {int(cov["total_pages"])} discovered' if cov.get('total_pages') else '') + (' (crawl capped)' if cov.get('crawl_capped') else ''))
-    if cov.get('job_pages') is not None: facts.append(f'{int(cov["job_pages"])} job pages found')
+    if cov.get('content_pages') is not None: facts.append(f'{_num(cov["content_pages"])} content pages analysed' + (f' of {_num(cov["total_pages"])} discovered' if cov.get('total_pages') else '') + (' (crawl capped)' if cov.get('crawl_capped') else ''))
+    if cov.get('job_pages') is not None: facts.append(f'{_num(cov["job_pages"])} job pages found')
     if cov.get('h1_missing'): facts.append(f'{len(cov["h1_missing"])} pages missing an H1')
     dh = cov.get('duplicate_headings') or {}
     if dh.get('cross_page') or dh.get('same_page'): facts.append(f'{len(dh.get("cross_page") or [])} headings duplicated across pages, {len(dh.get("same_page") or [])} within a page')
-    if report.get('response_time') is not None: facts.append(f'Homepage responded in {float(report["response_time"]):.2f}s (HTTP {_e(report.get("status_code"))})')
-    if report.get('word_count'): facts.append(f'{int(report["word_count"]):,} words on the homepage')
+    try:
+        if report.get('response_time') is not None: facts.append(f'Homepage responded in {float(report["response_time"]):.2f}s (HTTP {_e(report.get("status_code"))})')
+    except (TypeError, ValueError):
+        pass
+    if report.get('word_count'): facts.append(f'{_num(report["word_count"]):,} words on the homepage')
     facts_html = ''.join(f'<li>{f}</li>' for f in facts)
     pages_html = ', '.join(_e(p) for p in pages[:12]) + (f' +{len(pages) - 12} more' if len(pages) > 12 else '')
     tech = f'<div class="card"><h3>{_e(ts.get("headline"))}</h3><p>{_e(ts.get("body"))}</p></div>' if ts.get('headline') else ''
@@ -369,7 +394,7 @@ def build_html(report: dict, logo_src: str = None) -> str:
 FOOTER_TEMPLATE = (
     '<div style="width:100%;font-family:Inter,system-ui,sans-serif;font-size:8px;color:#94a3b8;'
     'padding:0 14mm;display:flex;justify-content:space-between">'
-    '<span>Shazamme Website Grader · webgrader.shazamme.com</span>'
+    f'<span>Shazamme Website Grader · {_e(PUBLIC_BASE_URL.replace("https://", "").replace("http://", ""))}</span>'
     '<span>Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>')
 
 

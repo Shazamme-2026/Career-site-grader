@@ -89,6 +89,17 @@ class Html(unittest.TestCase):
         self.assertNotIn('Core Web Vitals', html)
         self.assertNotIn('Competitor Benchmark', html)
 
+    def test_odd_values_do_not_crash_and_are_escaped(self):
+        rep = sample(overall_score='n/a', history=[{'overall': None}, {'overall': 'x'}])
+        rep['pillars']['seo']['score'] = 'bad'
+        rep['pillars']['seo']['checks'][0]['status'] = ['weird']
+        rep['pillars']['seo']['checks'][0]['score'] = '<img onerror=1>'
+        rep['pillars']['seo']['checks'][0]['value'] = 'v' * 2000
+        rep['comparison']['competitors'][0]['overall_score'] = '<b>'
+        html = full_report.build_html(rep)
+        self.assertNotIn('<img onerror=1>', html)
+        self.assertNotIn('v' * 400, html)
+
     def test_priority_order_and_check_counts(self):
         html = full_report.build_html(sample())
         self.assertIn('3 checks', html)
