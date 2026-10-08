@@ -6,11 +6,14 @@ import threading
 import re
 import time
 import secrets
+import sys
 from collections import defaultdict, deque
 from flask import Flask, request, Response, send_from_directory, jsonify
 from grader import CareerSiteGrader
 import db
 import emailer
+import client_report
+import competitors
 
 app = Flask(__name__, static_folder='public')
 db.init_db()
@@ -47,6 +50,15 @@ def _rate_ok(bucket: str, limit: int, window: int = 3600) -> bool:
             for k in [k for k, d in list(_rl.items()) if not d or d[-1] < now - window]:
                 _rl.pop(k, None)
         return True
+
+
+def _target_host(url: str) -> str:
+    from urllib.parse import urlparse as _up
+    u = url if url.lower().startswith(('http://', 'https://')) else 'https://' + url
+    try:
+        return _up(u).hostname or ''
+    except ValueError:
+        return ''
 
 
 def _report_link(report_id):
@@ -99,12 +111,22 @@ def _persist_and_enrich(event, fallback_url, mode, bypass=False):
         pass
     if not event.get('report_id'):
         event['report_id'] = secrets.token_urlsafe(8)
+    if not event.get('_owner'):
+        event['_owner'] = secrets.token_urlsafe(16)  # lets the grader change the comparison later
     return event
+
+
+def _public(report):
+    """Stored report without server-only fields."""
+    return {k: v for k, v in (report or {}).items() if not k.startswith('_')}
 
 
 async def _grade_competitor(url: str, mode: str) -> dict:
     """Light grade (no PageSpeed) of a competitor — returns headline + pillar scores."""
     try:
+        host = _target_host(url)
+        if not host or not competitors.is_public_host(host):
+            return {'url': url, 'domain': host, 'error': 'Could not analyse this site'}
         g = CareerSiteGrader(url, mode=mode, light=True)
         final = None
         async for ev in g.grade():
@@ -123,7 +145,8 @@ async def _grade_competitor(url: str, mode: str) -> dict:
             'authority': final.get('authority'),
         }
     except Exception as e:
-        return {'url': url, 'error': str(e)}
+        print(f'[compare] {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return {'url': url, 'domain': _target_host(url), 'error': 'Could not analyse this site'}
 
 
 async def _build_comparison(competitor_urls, mode, target_event) -> dict:
@@ -192,13 +215,13 @@ def grade():
 
     # Optional competitor benchmarking (comma-separated URLs, max 3)
     raw_comp = (request.args.get('competitors') or '').strip()
-    competitors = [c.strip() for c in raw_comp.split(',') if c.strip()][:3] if raw_comp else []
+    competitors_list = competitors.clean_urls(raw_comp.split(','), _target_host(url)) if raw_comp else []
 
     bypass = _bypass_requested()
 
     def generate():
         q: queue.Queue = queue.Queue()
-        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors, q, bypass), daemon=True)
+        t = threading.Thread(target=run_grader_in_thread, args=(url, mode, competitors_list, q, bypass), daemon=True)
         t.start()
 
         while True:
@@ -231,26 +254,21 @@ def health():
     return jsonify({'status': 'ok', 'service': 'Shazamme Career Site Grader'})
 
 
-@app.route('/api/logo')
-def api_logo():
-    """SSRF-guarded image proxy so a client's logo always loads and downloads in
-    the report, regardless of hotlink protection or CORS on the origin."""
+def _fetch_image(src: str, max_bytes: int = 3 * 1024 * 1024):
+    """SSRF-guarded image fetch. Returns (content_type, bytes) or None."""
     import urllib.request, ipaddress, socket
     from urllib.parse import urlparse as _up
-    src = (request.args.get('url') or '').strip()
-    if not src:
-        return ('', 400)
-    p = _up(src)
+    p = _up(src or '')
     if p.scheme not in ('http', 'https') or not p.hostname:
-        return ('', 400)
+        return None
     try:
         for info in socket.getaddrinfo(p.hostname, None):
             ip = ipaddress.ip_address(info[4][0])
             if (ip.is_private or ip.is_loopback or ip.is_link_local
                     or ip.is_reserved or ip.is_multicast):
-                return ('', 400)
+                return None
     except Exception:
-        return ('', 400)
+        return None
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *a, **k):
@@ -261,16 +279,130 @@ def api_logo():
         with opener.open(req, timeout=8) as r:
             ctype = (r.headers.get('content-type') or '').split(';')[0].strip()
             if not ctype.startswith('image/'):
-                return ('', 415)
-            data = r.read(3 * 1024 * 1024 + 1)
-        if len(data) > 3 * 1024 * 1024:
-            return ('', 413)
-        resp = Response(data, mimetype=ctype)
-        resp.headers['Cache-Control'] = 'public, max-age=86400'
-        resp.headers['Access-Control-Allow-Origin'] = '*'
-        return resp
+                return None
+            data = r.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        return ctype, data
     except Exception:
+        return None
+
+
+@app.route('/api/logo')
+def api_logo():
+    """Image proxy so a client's logo always loads and downloads in the report,
+    regardless of hotlink protection or CORS on the origin."""
+    src = (request.args.get('url') or '').strip()
+    if not src:
+        return ('', 400)
+    fetched = _fetch_image(src)
+    if not fetched:
         return ('', 502)
+    ctype, data = fetched
+    resp = Response(data, mimetype=ctype)
+    resp.headers['Cache-Control'] = 'public, max-age=86400'
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
+_logo_cache = {}
+_client_pdf_cache = {}
+_client_pdf_locks = {}
+_client_pdf_lock = threading.Lock()
+_RENDER_SLOTS = int(os.environ.get('CLIENT_PDF_RENDER_SLOTS', '2'))
+_render_sem = threading.BoundedSemaphore(_RENDER_SLOTS)
+
+
+def _bounded_put(cache: dict, key, value, cap: int = 50):
+    """FIFO-bounded insert. Caller holds _client_pdf_lock."""
+    if len(cache) >= cap:
+        cache.pop(next(iter(cache)))
+    cache[key] = value
+
+
+def _logo_data_uri(report_id, report):
+    """Client logo as a data URI so the PDF never depends on a third-party host.
+    Cached per report so the HTML and PDF routes fetch the origin at most once."""
+    import base64
+    with _client_pdf_lock:
+        if report_id in _logo_cache:
+            return _logo_cache[report_id]
+    uri = None
+    src = (report or {}).get('client_logo')
+    fetched = _fetch_image(src) if src else None
+    if fetched:
+        ctype, data = fetched
+        uri = f'data:{ctype};base64,' + base64.b64encode(data).decode('ascii')
+    with _client_pdf_lock:
+        _bounded_put(_logo_cache, report_id, uri)
+    return uri
+
+
+def _per_report_lock(report_id):
+    with _client_pdf_lock:
+        lock = _client_pdf_locks.get(report_id)
+        if lock is None:
+            if len(_client_pdf_locks) >= 200:
+                _client_pdf_locks.clear()
+            lock = _client_pdf_locks[report_id] = threading.Lock()
+        return lock
+
+
+def _client_pdf_filename(report):
+    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
+    return f'{domain}-opportunity-report.pdf'
+
+
+@app.route('/r/<report_id>/client')
+def client_report_html(report_id):
+    """Client-facing opportunity report as a print-ready page (fallback when
+    server-side PDF rendering is unavailable: the browser's Save as PDF)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    if not _rate_ok('client_html', limit=60):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+    if request.args.get('print') == '1':
+        html = html.replace('</body>', '<script>window.onload=function(){window.print()}</script></body>')
+    return Response(html, mimetype='text/html')
+
+
+@app.route('/r/<report_id>/client.pdf')
+def client_report_pdf(report_id):
+    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    with _client_pdf_lock:
+        pdf = _client_pdf_cache.get(report_id)
+    if pdf is None:
+        if not _rate_ok('client_pdf', limit=20):
+            return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+        # Same report: one render, the rest wait and reuse it (no stampede).
+        with _per_report_lock(report_id):
+            with _client_pdf_lock:
+                pdf = _client_pdf_cache.get(report_id)
+            if pdf is None:
+                html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+                # Cap concurrent Chromium processes across the worker.
+                if not _render_sem.acquire(timeout=5):
+                    return jsonify({'error': 'busy', 'fallback': f'/r/{report_id}/client?print=1'}), 503
+                try:
+                    pdf = client_report.render_pdf(html)
+                except Exception as e:
+                    print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
+                          file=sys.stderr, flush=True)
+                    return jsonify({'error': 'pdf unavailable',
+                                    'fallback': f'/r/{report_id}/client?print=1'}), 503
+                finally:
+                    _render_sem.release()
+                with _client_pdf_lock:
+                    _bounded_put(_client_pdf_cache, report_id, pdf)
+    resp = Response(pdf, mimetype='application/pdf')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{_client_pdf_filename(report)}"'
+    resp.headers['Cache-Control'] = 'private, max-age=86400'
+    return resp
 
 
 @app.route('/methodology')
@@ -404,6 +536,8 @@ def api_grade():
         return jsonify({'error': f'mode must be one of: {", ".join(VALID_MODES)}'}), 400
 
     bypass = _bypass_requested()
+    raw_comp = (request.args.get('competitors') or '').strip()
+    comp_urls = competitors.clean_urls(raw_comp.split(','), _target_host(url)) if raw_comp else []
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -415,6 +549,11 @@ def api_grade():
                 return {'error': ev.get('message', 'failed')}
             if ev.get('type') == 'complete':
                 final = ev
+        if final and comp_urls:
+            try:
+                final['comparison'] = await _build_comparison(comp_urls, mode, final)
+            except Exception:
+                pass
         return final
 
     try:
@@ -433,12 +572,92 @@ def api_grade():
     return resp
 
 
+# --- Competitors -------------------------------------------------------------
+
+_competitor_cache = {}
+
+
+@app.route('/api/competitors')
+def api_competitors():
+    """AI competitor finder: two direct competitors for a site (Claude + web search)."""
+    url = (request.args.get('url') or '').strip()[:competitors.MAX_URL_LEN]
+    mode = (request.args.get('mode') or 'recruitment').strip()
+    if not url or mode not in VALID_MODES:
+        return jsonify({'error': 'url and a valid mode are required'}), 400
+    if not url.lower().startswith(('http://', 'https://')):
+        url = 'https://' + url
+    if not competitors.enabled():
+        return jsonify({'error': 'AI competitor finder is not configured (ANTHROPIC_API_KEY). '
+                                 'Enter competitor websites manually.'}), 503
+    key = (competitors._host(url), mode)
+    with _client_pdf_lock:
+        cached = _competitor_cache.get(key)
+    if cached is not None:
+        found, ts = cached
+        if found or time.time() - ts < 600:  # empty answers are cached for 10 minutes
+            return jsonify({'competitors': found, 'cached': True})
+    if not _rate_ok('competitors', limit=15):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    try:
+        found = competitors.find_competitors(url, mode)
+    except Exception as e:
+        print(f'[competitors] finder failed for {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+        return jsonify({'error': 'Could not find competitors right now. Enter them manually.'}), 502
+    with _client_pdf_lock:
+        _bounded_put(_competitor_cache, key, (found, time.time()))
+    return jsonify({'competitors': found})
+
+
+@app.route('/api/compare', methods=['POST'])
+def api_compare():
+    """Attach a competitor comparison (up to 2) to an existing stored report."""
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({'error': 'JSON object required'}), 400
+    report_id = data.get('report_id')
+    if not isinstance(report_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{4,64}', report_id):
+        return jsonify({'error': 'report not found'}), 404
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'report not found'}), 404
+    # Only the browser that ran the grade may change its comparison (reports made
+    # before owner tokens existed stay editable).
+    owner = report.get('_owner')
+    if owner and not secrets.compare_digest(str(data.get('owner') or ''), owner):
+        return jsonify({'error': 'Only the person who ran this grade can change its comparison.'}), 403
+    raw = data.get('competitors')
+    if not isinstance(raw, list) or len(raw) > 5:
+        return jsonify({'error': 'competitors must be a list of up to 5 websites.'}), 400
+    urls = competitors.clean_urls(raw, report.get('domain', ''))
+    if not urls:
+        return jsonify({'error': 'Enter at least one competitor website that can be reached.'}), 400
+    if not _rate_ok('compare', limit=20):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    mode = report.get('mode') or 'recruitment'
+    with _per_report_lock(report_id):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            comparison = loop.run_until_complete(_build_comparison(urls, mode, report))
+        except Exception as e:
+            print(f'[compare] failed for {report_id}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
+            return jsonify({'error': 'Could not analyse the competitors. Please try again.'}), 502
+        finally:
+            loop.close()
+        db.set_report_comparison(report_id, comparison)
+        with _client_pdf_lock:
+            _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison table
+    resp = jsonify({'ok': True, 'comparison': comparison})
+    resp.headers['Access-Control-Allow-Origin'] = '*'
+    return resp
+
+
 @app.route('/api/report/<report_id>')
 def api_report(report_id):
     report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'not found'}), 404
-    resp = jsonify(report)
+    resp = jsonify(_public(report))
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp
 

@@ -285,6 +285,34 @@ def save_report(report_id: str, url: str, mode: str, report: Dict) -> bool:
         return False
 
 
+def set_report_comparison(report_id: str, comparison: Dict) -> bool:
+    """Attach a competitor comparison to a stored report. Read-modify-write inside
+    one immediate transaction so concurrent writers never clobber each other."""
+    if not _ENABLED:
+        return False
+    try:
+        with _LOCK:
+            conn = _connect()
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute('SELECT report_json FROM reports WHERE id=?', (report_id,)).fetchone()
+                if not row:
+                    conn.rollback()
+                    return False
+                report = json.loads(row['report_json'])
+                report['comparison'] = comparison
+                conn.execute('UPDATE reports SET report_json=? WHERE id=?', (json.dumps(report), report_id))
+                conn.commit()
+                return True
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+    except Exception:
+        return False
+
+
 def get_report(report_id: str) -> Optional[Dict]:
     if not _ENABLED:
         return None
