@@ -13,6 +13,7 @@ from grader import CareerSiteGrader
 import db
 import emailer
 import client_report
+import full_report
 import competitors
 
 app = Flask(__name__, static_folder='public')
@@ -348,11 +349,6 @@ def _per_report_lock(report_id):
         return lock
 
 
-def _client_pdf_filename(report):
-    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
-    return f'{domain}-opportunity-report.pdf'
-
-
 @app.route('/r/<report_id>/client')
 def client_report_html(report_id):
     """Client-facing opportunity report as a print-ready page (fallback when
@@ -368,208 +364,74 @@ def client_report_html(report_id):
     return Response(html, mimetype='text/html')
 
 
-@app.route('/r/<report_id>/client.pdf')
-def client_report_pdf(report_id):
-    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+_PDF_KINDS = {
+    'client': (client_report.build_html, client_report.render_pdf, '-opportunity-report.pdf'),
+    'full': (full_report.build_html, full_report.render_pdf, '-grade-report.pdf'),
+}
+
+
+def _serve_pdf(report_id, kind):
     report = db.get_report(report_id)
     if not report:
         return jsonify({'error': 'not found'}), 404
+    build, render, suffix = _PDF_KINDS[kind]
+    key = (report_id, kind)
     with _client_pdf_lock:
-        pdf = _client_pdf_cache.get(report_id)
+        pdf = _client_pdf_cache.get(key)
     if pdf is None:
         if not _rate_ok('client_pdf', limit=20):
             return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
         # Same report: one render, the rest wait and reuse it (no stampede).
-        with _per_report_lock(report_id):
+        with _per_report_lock(key):
             with _client_pdf_lock:
-                pdf = _client_pdf_cache.get(report_id)
+                pdf = _client_pdf_cache.get(key)
             if pdf is None:
-                html = client_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+                html = build(report, logo_src=_logo_data_uri(report_id, report))
                 # Cap concurrent Chromium processes across the worker.
                 if not _render_sem.acquire(timeout=5):
-                    return jsonify({'error': 'busy', 'fallback': f'/r/{report_id}/client?print=1'}), 503
+                    return jsonify({'error': 'busy', 'fallback': f'/r/{report_id}/{kind}?print=1'}), 503
                 try:
-                    pdf = client_report.render_pdf(html)
+                    pdf = render(html)
                 except Exception as e:
-                    print(f'[client_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
+                    print(f'[{kind}_report] pdf render failed for {report_id}: {type(e).__name__}: {e}',
                           file=sys.stderr, flush=True)
                     return jsonify({'error': 'pdf unavailable',
-                                    'fallback': f'/r/{report_id}/client?print=1'}), 503
+                                    'fallback': f'/r/{report_id}/{kind}?print=1'}), 503
                 finally:
                     _render_sem.release()
                 with _client_pdf_lock:
-                    _bounded_put(_client_pdf_cache, report_id, pdf)
+                    _bounded_put(_client_pdf_cache, key, pdf)
     resp = Response(pdf, mimetype='application/pdf')
-    resp.headers['Content-Disposition'] = f'attachment; filename="{_client_pdf_filename(report)}"'
+    domain = re.sub(r'[^a-z0-9.-]+', '-', (report.get('domain') or 'website').lower())
+    resp.headers['Content-Disposition'] = f'attachment; filename="{domain}{suffix}"'
     resp.headers['Cache-Control'] = 'private, max-age=86400'
     return resp
 
 
-@app.route('/methodology')
-def methodology():
-    return send_from_directory('public', 'methodology.html')
+@app.route('/r/<report_id>/client.pdf')
+def client_report_pdf(report_id):
+    """Client-facing opportunity report as a downloadable A4 PDF (Chromium)."""
+    return _serve_pdf(report_id, 'client')
 
 
-@app.route('/lead', methods=['POST'])
-def lead():
-    """Capture an email for the full report and (optionally) monthly monitoring."""
-    data = request.get_json(silent=True) or request.form
-    email = (data.get('email') or '').strip().lower()
-    url = (data.get('url') or '').strip()
-    mode = (data.get('mode') or '').strip()
-    overall = data.get('overall')
-    want_monitor = str(data.get('monitor', '')).lower() in ('1', 'true', 'yes', 'on')
-    if not _EMAIL_RE.match(email):
-        return jsonify({'ok': False, 'error': 'Please enter a valid email address.'}), 400
-    try:
-        overall = int(overall) if overall is not None else None
-    except (TypeError, ValueError):
-        overall = None
-    db.save_lead(email, url, mode, overall)
-    monitoring = False
-    if want_monitor and url and mode in VALID_MODES:
-        monitoring = db.add_monitor(email, url, mode)
-
-    # Email the report (best-effort; needs SENDGRID_API_KEY)
-    emailed = False
-    report_id = (data.get('report_id') or '').strip()
-    grade = (data.get('grade') or '').strip()
-    top_fixes = None
-    if report_id:
-        stored = db.get_report(report_id)
-        if stored:
-            overall = stored.get('overall_score', overall)
-            grade = stored.get('grade', grade)
-            es = stored.get('executive_summary') or {}
-            top_fixes = es.get('top_opportunities')
-    if emailer.enabled() and overall is not None:
-        emailed = emailer.send_report_email(email, url, mode, overall, grade,
-                                             _report_link(report_id), top_fixes)
-    return jsonify({'ok': True, 'monitoring': monitoring, 'emailed': emailed})
+@app.route('/r/<report_id>/full')
+def full_report_html(report_id):
+    """Technical report as a print-ready page (fallback when Chromium is unavailable)."""
+    report = db.get_report(report_id)
+    if not report:
+        return jsonify({'error': 'not found'}), 404
+    if not _rate_ok('client_html', limit=60):
+        return jsonify({'error': 'Rate limit reached — please try again later.'}), 429
+    html = full_report.build_html(report, logo_src=_logo_data_uri(report_id, report))
+    if request.args.get('print') == '1':
+        html = html.replace('</body>', '<script>window.onload=function(){window.print()}</script></body>')
+    return Response(html, mimetype='text/html')
 
 
-@app.route('/api/history')
-def api_history():
-    domain = (request.args.get('domain') or '').strip()
-    mode = (request.args.get('mode') or 'recruitment').strip()
-    if not domain:
-        return jsonify({'error': 'domain required'}), 400
-    return jsonify({'domain': domain, 'mode': mode, 'history': db.history(domain, mode)})
-
-
-_cwv_jobs = set()
-_cwv_lock = threading.Lock()
-
-
-def _measure_cwv_bg(url, mode):
-    """Background Core Web Vitals measurement — runs the slow PageSpeed pass and
-    caches the result so polling requests stay instant."""
-    try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        async def run():
-            g = CareerSiteGrader(url, mode=mode)
-            g.psi_timeouts = (75, 55)
-            await g._fetch_pagespeed()
-            return g.pagespeed
-
-        try:
-            cwv = loop.run_until_complete(run())
-        finally:
-            loop.close()
-        if cwv and cwv.get('perf_score') is not None:
-            db.save_cwv(url, mode, cwv)
-    except Exception:
-        pass
-    finally:
-        with _cwv_lock:
-            _cwv_jobs.discard((url, mode))
-
-
-@app.route('/api/cwv')
-def api_cwv():
-    """Fast, poll-friendly Core Web Vitals. Returns cached data immediately if we
-    have it; otherwise kicks off a background measurement and returns 'pending'
-    so the browser can poll without holding a long connection open (which proxies
-    and browsers cut off)."""
-    url = (request.args.get('url') or '').strip()
-    mode = (request.args.get('mode') or 'recruitment').strip()
-    if not url:
-        return jsonify({'error': 'url required'}), 400
-
-    cached = None if _bypass_requested() else db.get_cwv(url, mode)
-    # A cached blob missing its desktop reading is incomplete (an earlier
-    # desktop-drop poisoned it): keep serving the mobile data we have, but kick a
-    # background re-measure to backfill desktop so the card heals on next view.
-    needs_measure = (cached is None) or (not cached.get('desktop'))
-    status = 'ready' if cached else 'pending'
-    if needs_measure:
-        # Only spawn a (billable) PageSpeed job for URLs that were actually graded,
-        # rate-limited at spawn time — prevents anonymous PSI-cost abuse via ?url=.
-        if not db.url_graded(url, mode):
-            if not cached:
-                status = 'unavailable'
-        else:
-            key = (url, mode)
-            with _cwv_lock:
-                if key in _cwv_jobs:
-                    pass  # already measuring — keep polling
-                elif _rate_ok('cwv', limit=60):
-                    _cwv_jobs.add(key)
-                    threading.Thread(target=_measure_cwv_bg, args=(url, mode), daemon=True).start()
-                elif not cached:
-                    status = 'unavailable'
-    resp = jsonify({'status': status, 'core_web_vitals': cached})
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    return resp
-
-
-@app.route('/api/grade')
-def api_grade():
-    """Non-streaming JSON grade — for the Client Portal and integrations."""
-    url = (request.args.get('url') or '').strip()
-    mode = (request.args.get('mode') or 'recruitment').strip()
-    if not url:
-        return jsonify({'error': 'url required'}), 400
-    if mode not in VALID_MODES:
-        return jsonify({'error': f'mode must be one of: {", ".join(VALID_MODES)}'}), 400
-
-    bypass = _bypass_requested()
-    raw_comp = (request.args.get('competitors') or '').strip()
-    comp_urls = competitors.clean_urls(raw_comp.split(','), _target_host(url)) if raw_comp else []
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    async def run():
-        grader = CareerSiteGrader(url, mode=mode, bypass_cache=bypass)
-        final = None
-        async for ev in grader.grade():
-            if ev.get('type') == 'error':
-                return {'error': ev.get('message', 'failed')}
-            if ev.get('type') == 'complete':
-                final = ev
-        if final and comp_urls:
-            try:
-                final['comparison'] = await _build_comparison(comp_urls, mode, final)
-            except Exception:
-                pass
-        return final
-
-    try:
-        result = loop.run_until_complete(run())
-    finally:
-        loop.close()
-    if not result or 'error' in (result or {}):
-        return jsonify(result or {'error': 'no result'}), 502
-    _persist_and_enrich(result, url, mode, bypass=bypass)
-    try:
-        db.save_report(result['report_id'], result.get('url', url), mode, result)
-    except Exception:
-        pass
-    resp = jsonify(result)
-    resp.headers['Access-Control-Allow-Origin'] = '*'
-    return resp
+@app.route('/r/<report_id>/full.pdf')
+def full_report_pdf(report_id):
+    """Full technical report as a downloadable A4 PDF (Chromium)."""
+    return _serve_pdf(report_id, 'full')
 
 
 # --- Competitors -------------------------------------------------------------
@@ -646,7 +508,8 @@ def api_compare():
             loop.close()
         db.set_report_comparison(report_id, comparison)
         with _client_pdf_lock:
-            _client_pdf_cache.pop(report_id, None)  # the client PDF now has a comparison table
+            for kind in _PDF_KINDS:  # both PDFs now carry a comparison table
+                _client_pdf_cache.pop((report_id, kind), None)
     resp = jsonify({'ok': True, 'comparison': comparison})
     resp.headers['Access-Control-Allow-Origin'] = '*'
     return resp

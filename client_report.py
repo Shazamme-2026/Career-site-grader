@@ -786,7 +786,8 @@ def _log(msg):
     print(f'[client_report] {msg}', file=sys.stderr, flush=True)
 
 
-def render_pdf(html: str, timeout_ms: int = 30000) -> bytes:
+def render_pdf(html: str, timeout_ms: int = 30000, margin: dict = None,
+               footer_template: str = None) -> bytes:
     """Render print-ready HTML to A4 PDF bytes with Chromium. Raises on failure."""
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
@@ -803,8 +804,12 @@ def render_pdf(html: str, timeout_ms: int = 30000) -> bytes:
             except Exception:
                 pass  # fall back to the system font; never fail the PDF for a font
             page.emulate_media(media='print')
-            pdf = page.pdf(format='A4', print_background=True,
-                           margin={'top': '0', 'right': '0', 'bottom': '0', 'left': '0'})
+            opts = dict(format='A4', print_background=True,
+                        margin=margin or {'top': '0', 'right': '0', 'bottom': '0', 'left': '0'})
+            if footer_template:
+                opts.update(display_header_footer=True, header_template='<span></span>',
+                            footer_template=footer_template)
+            pdf = page.pdf(**opts)
             _log(f'rendered {len(pdf)} bytes')
             return pdf
         finally:
