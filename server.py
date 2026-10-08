@@ -647,7 +647,10 @@ def api_competitors():
         found = competitors.find_competitors(url, mode)
     except Exception as e:
         print(f'[competitors] finder failed for {url}: {type(e).__name__}: {e}', file=sys.stderr, flush=True)
-        return jsonify({'error': 'Could not find competitors right now. Enter them manually.'}), 502
+        # Class name only (no message): enough to tell a bad key, a billing block
+        # or a missing model apart from outside, without leaking details.
+        return jsonify({'error': f'Could not find competitors right now ({type(e).__name__}). '
+                                 'Enter them manually.', 'reason': type(e).__name__}), 502
     with _client_pdf_lock:
         _bounded_put(_competitor_cache, key, (found, time.time()))
     return jsonify({'competitors': found})
