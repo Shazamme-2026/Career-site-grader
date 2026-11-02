@@ -18,7 +18,8 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-      actions: read
+      # write: the last step dispatches CI on Claude's branch.
+      actions: write
     steps:
       - uses: actions/checkout@v6
         with: { fetch-depth: 1 }
@@ -27,3 +28,64 @@ jobs:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_non_write_users: "Alex-Sorochan,khris-samaniego,kimynymbl,ManuelShazamme,markSHAZ,paulamogg,sekharkasi,surajnymbl1907,zbarettnymbl"
+          # The repo lets Actions create PRs (the last step needs it), and that
+          # same setting lets GITHUB_TOKEN approve them. So the model may never
+          # review, merge or reach the raw API: only a human approves and merges.
+          claude_args: |
+            --disallowedTools "Bash(gh pr merge:*),Bash(gh pr review:*),Bash(gh api:*)"
+            --append-system-prompt "Do not open the PR yourself: the workflow opens one for your branch after you finish. Never approve or merge."
+
+      # The action pushes a claude/issue-<n>-* branch and stops at a "Create
+      # PR" link that nobody clicks (Shazamme-backend#187-#189). All work is
+      # tracked as PRs and only a human merges, so open the PR here,
+      # deterministically, instead of trusting the model to. PRs and pushes made
+      # with GITHUB_TOKEN don't fire CI, so dispatch it on the branch too.
+      - name: Open PR and run CI for Claude's branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+          TITLE: ${{ github.event.issue.title }}
+          ON_PR: ${{ (github.event.pull_request || github.event.issue.pull_request) && 'true' || 'false' }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          BASE: main
+          CI_WORKFLOWS: "tests.yml"
+        run: |
+          set -uo pipefail
+          [ -n "$NUMBER" ] || exit 0
+          [ "$(git rev-parse --is-shallow-repository)" = false ] || git fetch --quiet --unshallow origin
+          git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*'
+          failed=0
+
+          # Skip a head that already has a CI run, so a question-only comment
+          # or a stale branch doesn't queue another one.
+          dispatch_ci() {
+            local ref="$1" sha="$2" wf
+            for wf in $CI_WORKFLOWS; do
+              [ -z "$(gh run list --workflow "$wf" --commit "$sha" --json databaseId -q '.[0].databaseId')" ] || continue
+              gh workflow run "$wf" --ref "$ref" || echo "::warning::could not dispatch $wf on $ref"
+            done
+          }
+
+          if [ "$ON_PR" = "true" ]; then
+            ref="$(gh pr view "$NUMBER" --json headRefName -q .headRefName)"
+            git rev-parse --verify --quiet "origin/$ref" >/dev/null || exit 0
+            dispatch_ci "$ref" "$(git rev-parse "origin/$ref")"
+            exit 0
+          fi
+
+          for ref in $(git for-each-ref --format='%(refname:lstrip=3)' "refs/remotes/origin/claude/issue-${NUMBER}-*"); do
+            sha="$(git rev-parse "origin/$ref")"
+            [ "$(git rev-list --count "origin/$BASE..$sha")" -gt 0 ] || continue
+            # A PR (open, closed or merged) already covers this exact commit.
+            # New commits pushed after a PR was closed get a fresh one.
+            covered="$(gh pr list --head "$ref" --state all --json headRefOid -q "[.[] | select(.headRefOid == \"$sha\")] | length")"
+            if [ "${covered:-0}" = "0" ]; then
+              if ! gh pr list --head "$ref" --state open --json number -q '.[0].number' | grep -q .; then
+                gh pr create --base "$BASE" --head "$ref" --title "${TITLE:-@claude fix} (#$NUMBER)" --body "$(printf 'Closes #%s\n\nOpened automatically from @claude run %s. Claude'"'"'s summary of the change is on the issue thread.\n\nReview and merge by a human only.\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)' "$NUMBER" "$RUN_URL")" \
+                  || { echo "::error::could not open a PR for $ref"; failed=1; }
+              fi
+            fi
+            dispatch_ci "$ref" "$sha"
+          done
+          exit "$failed"
